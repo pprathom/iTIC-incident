@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iTIC Accident Data Explorer</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230f766e'/%3E%3Ctext x='50' y='68' font-size='46' font-family='sans-serif' font-weight='700' fill='white' text-anchor='middle'%3EiT%3C/text%3E%3C/svg%3E" />
+    <script>
+      /* ตั้งธีมก่อนวาดหน้า เพื่อไม่ให้จอวาบขาวตอนโหลด */
+      (function () {
+        try {
+          var saved = localStorage.getItem('itic-theme');
+          var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          document.documentElement.dataset.theme = saved || (dark ? 'dark' : 'light');
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="styles.css?v=2" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">iTIC</div>
+        <div class="brand-text">
+          <h1>Accident Data Explorer</h1>
+          <p>ค้นหาและส่งออกรายการอุบัติเหตุทางถนน</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="btn btn-ghost btn-sm theme-toggle" type="button" aria-pressed="false">
+          <span class="theme-icon" id="theme-icon" aria-hidden="true">🌙</span>
+          <span class="theme-label" id="theme-label">โหมดมืด</span>
+        </button>
+
+        <div id="session-info" class="session" hidden>
+          <span class="dot"></span>
+          <span id="session-user" class="session-user"></span>
+          <button id="logout-btn" class="btn btn-ghost btn-sm" type="button">ออกจากระบบ</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- ============================ LOGIN ============================ -->
+      <section id="login-view" class="login-wrap">
+        <form id="login-form" class="card login-card" autocomplete="on">
+          <h2>เข้าสู่ระบบ</h2>
+          <p class="muted">
+            ใช้บัญชี iTIC Foundation ของท่าน ข้อมูลรับรองจะถูกส่งต่อไปยังเซิร์ฟเวอร์ API
+            โดยตรงและเก็บ token ไว้ฝั่งเซิร์ฟเวอร์เท่านั้น
+          </p>
+
+          <label class="field">
+            <span>ชื่อผู้ใช้</span>
+            <input id="login-user" name="user" type="text" autocomplete="username" required />
+          </label>
+
+          <label class="field">
+            <span>รหัสผ่าน</span>
+            <input id="login-pass" name="pass" type="password" autocomplete="current-password" required />
+          </label>
+
+          <button class="btn btn-primary btn-block" type="submit" id="login-submit">เข้าสู่ระบบ</button>
+          <p id="login-error" class="error" hidden></p>
+        </form>
+      </section>
+
+      <!-- ============================= APP ============================= -->
+      <section id="app-view" hidden>
+        <form id="filter-form" class="card filter-card" novalidate>
+          <div class="card-head">
+            <h2>เงื่อนไขการค้นหา</h2>
+            <div class="quick-ranges">
+              <button type="button" class="chip" data-range="7">7 วันล่าสุด</button>
+              <button type="button" class="chip" data-range="30">30 วันล่าสุด</button>
+              <button type="button" class="chip" data-range="90">90 วันล่าสุด</button>
+              <button type="button" class="chip" data-range="year">ทั้งปีนี้</button>
+            </div>
+          </div>
+
+          <div class="grid">
+            <label class="field">
+              <span>แหล่งข้อมูล</span>
+              <select id="source_id" name="source_id">
+                <option value="0">ทั้งหมด</option>
+                <option value="3" selected>RAIS</option>
+                <option value="1">RVP</option>
+                <option value="2">iTIC</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>ระดับความรุนแรง</span>
+              <select id="severity_id" name="severity_id">
+                <option value="1" selected>ทั้งหมด</option>
+                <option value="2">มีผู้บาดเจ็บ</option>
+                <option value="3">มีผู้เสียชีวิต</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>จังหวัด</span>
+              <select id="province" required></select>
+            </label>
+
+            <label class="field">
+              <span>วันที่เริ่มต้น</span>
+              <input id="start_date" type="date" min="2023-01-01" max="2025-12-31" required />
+            </label>
+
+            <label class="field">
+              <span>วันที่สิ้นสุด</span>
+              <input id="end_date" type="date" min="2023-01-01" max="2025-12-31" required />
+            </label>
+
+            <label class="field">
+              <span>คำค้น (เช่น ชื่อถนน / สถานที่)</span>
+              <input id="keyword" type="text" placeholder="ไม่บังคับ" autocomplete="off" />
+            </label>
+          </div>
+
+          <details class="advanced">
+            <summary>ตัวเลือกขั้นสูง (จำกัดพื้นที่ / จำนวนรายการ)</summary>
+            <div class="grid advanced-grid">
+              <label class="field checkbox-field">
+                <input id="use-area" type="checkbox" />
+                <span>จำกัดพื้นที่รอบจุด (point + buffer)</span>
+              </label>
+
+              <label class="field">
+                <span>ค้นหาสถานที่ (ชื่อแยก / ถนน / สถานที่)</span>
+                <div class="input-row">
+                  <input id="place-query" type="text" placeholder="เช่น แยกพญาไท" autocomplete="off" />
+                  <button type="button" class="btn btn-outline" id="place-search-btn">ค้นหา</button>
+                </div>
+              </label>
+
+              <label class="field" id="place-result-field" hidden>
+                <span>เลือกสถานที่ที่พบ</span>
+                <select id="place-result"></select>
+              </label>
+
+              <label class="field">
+                <span>ละติจูด (lat)</span>
+                <input id="lat" type="number" step="any" placeholder="13.7563" disabled />
+              </label>
+
+              <label class="field">
+                <span>ลองจิจูด (lon)</span>
+                <input id="lon" type="number" step="any" placeholder="100.5018" disabled />
+              </label>
+
+              <label class="field">
+                <span>รัศมี (เมตร)</span>
+                <input id="buffer" type="number" min="1" step="any" value="1000" disabled />
+              </label>
+
+              <label class="field">
+                <span>จำนวนต่อครั้ง (limit)</span>
+                <select id="limit">
+                  <option value="500">500</option>
+                  <option value="1000">1,000</option>
+                  <option value="2000" selected>2,000</option>
+                </select>
+              </label>
+
+              <label class="field checkbox-field">
+                <input id="fetch-all" type="checkbox" checked />
+                <span>ดึงข้อมูลทั้งหมด (แบ่งหน้าอัตโนมัติ)</span>
+              </label>
+            </div>
+          </details>
+
+          <div class="actions">
+            <button type="submit" class="btn btn-primary" id="search-btn">ค้นหาข้อมูล</button>
+            <button type="button" class="btn btn-ghost" id="reset-btn">ล้างเงื่อนไข</button>
+            <span id="status-line" class="status-line" role="status"></span>
+          </div>
+        </form>
+
+        <!-- ------------------------- RESULTS ------------------------- -->
+        <section class="results">
+          <div class="card area-card" id="area-card" hidden>
+            <div class="area-icon">📍</div>
+            <div class="area-body">
+              <h3 id="area-title">—</h3>
+              <p id="area-detail" class="muted"></p>
+              <div id="area-chips" class="area-chips"></div>
+            </div>
+          </div>
+
+          <div class="card map-card" id="map-card" hidden>
+            <div class="map-head">
+              <div>
+                <h3>แผนที่อุบัติเหตุ</h3>
+                <p class="muted" id="map-sub">—</p>
+              </div>
+              <div class="map-actions">
+                <button type="button" class="btn btn-outline btn-sm" id="map-fit">ดูผลลัพธ์ทั้งหมด</button>
+              </div>
+            </div>
+            <div id="map" class="map-canvas"></div>
+            <div class="map-foot">
+              <div class="map-legend">
+                <span class="legend-item"><i class="legend-dot dot-death"></i>เสียชีวิต</span>
+                <span class="legend-item"><i class="legend-dot dot-injured"></i>บาดเจ็บ</span>
+                <span class="legend-item"><i class="legend-dot dot-none"></i>ไม่มีผู้บาดเจ็บ</span>
+                <span class="legend-item"><i class="legend-dot dot-event"></i>เหตุการณ์ปัจจุบัน</span>
+                <span class="legend-item"><i class="legend-dot dot-pin"></i>จุดค้นหา</span>
+              </div>
+              <span class="map-hint">ลากหมุด หรือคลิกบนแผนที่เพื่อย้ายจุดค้นหา</span>
+            </div>
+          </div>
+
+          <div class="card events-card" id="events-card" hidden>
+            <div class="events-head">
+              <div>
+                <h3>เหตุการณ์ปัจจุบัน</h3>
+                <p class="muted" id="events-sub"></p>
+              </div>
+              <button type="button" class="btn btn-outline btn-sm" id="events-export">ส่งออก CSV</button>
+            </div>
+            <ul class="events-list" id="events-list"></ul>
+            <p class="events-foot muted">ข้อมูลจาก Longdo Map — เป็นเหตุการณ์สด ไม่ใช่ข้อมูลสถิติอุบัติเหตุ</p>
+          </div>
+
+          <div class="stats" id="stats" hidden>
+            <div class="stat">
+              <span class="stat-label">รายการอุบัติเหตุ</span>
+              <strong id="stat-total">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">ผู้เสียชีวิต</span>
+              <strong id="stat-death">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">ผู้บาดเจ็บ</span>
+              <strong id="stat-injured">0</strong>
+            </div>
+            <div class="stat">
+              <span class="stat-label">ช่วงวันที่</span>
+              <strong id="stat-range">—</strong>
+            </div>
+          </div>
+
+          <div class="card table-card" id="table-card" hidden>
+            <div class="table-toolbar">
+              <div class="toolbar-left">
+                <label class="field inline">
+                  <span>ประเภทยานพาหนะ</span>
+                  <select id="vehicle-filter">
+                    <option value="">ทั้งหมด</option>
+                  </select>
+                </label>
+                <label class="field inline">
+                  <span>กรองในผลลัพธ์</span>
+                  <input id="row-search" type="search" placeholder="ตำบล / อำเภอ / วันที่" autocomplete="off" />
+                </label>
+              </div>
+              <div class="toolbar-right">
+                <button type="button" class="btn btn-outline" id="export-btn">ส่งออก CSV</button>
+                <button type="button" class="btn btn-outline" id="export-detail-btn">CSV รายละเอียดผู้ประสบเหตุ</button>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table id="result-table">
+                <thead>
+                  <tr>
+                    <th class="sortable" data-sort="datetime">วัน–เวลา</th>
+                    <th>แหล่ง</th>
+                    <th class="num sortable" data-sort="death">เสียชีวิต</th>
+                    <th class="num sortable" data-sort="injured">บาดเจ็บ</th>
+                    <th>ตำบล</th>
+                    <th>อำเภอ</th>
+                    <th>พิกัด (lat, lon)</th>
+                    <th>ยานพาหนะ</th>
+                    <th class="num">ผู้ประสบเหตุ</th>
+                  </tr>
+                </thead>
+                <tbody id="result-body"></tbody>
+              </table>
+            </div>
+
+            <div class="table-footer">
+              <span id="row-count" class="muted"></span>
+              <div class="pager">
+                <button type="button" class="btn btn-ghost btn-sm" id="prev-page">ก่อนหน้า</button>
+                <span id="page-info" class="muted"></span>
+                <button type="button" class="btn btn-ghost btn-sm" id="next-page">ถัดไป</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card empty" id="empty-state">
+            <p>ยังไม่มีข้อมูล — กำหนดเงื่อนไขแล้วกด <strong>ค้นหาข้อมูล</strong></p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <!-- --------------------------- DETAIL --------------------------- -->
+    <dialog id="detail-dialog" class="detail-dialog">
+      <div class="dialog-head">
+        <h3 id="detail-title">รายละเอียดอุบัติเหตุ</h3>
+        <button type="button" class="btn btn-ghost btn-sm" id="detail-close">ปิด</button>
+      </div>
+      <div id="detail-body" class="dialog-body"></div>
+    </dialog>
+
+    <script src="vendor/leaflet/leaflet.js"></script>
+    <script src="app.js?v=2"></script>
+  </body>
+</html>

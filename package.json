@@ -1,0 +1,14 @@
+{
+  "name": "itic-accident-explorer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web app สำหรับค้นหาและส่งออกรายการอุบัติเหตุจาก iTIC Foundation API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
