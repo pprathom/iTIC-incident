@@ -4,8 +4,14 @@
 /* Constants                                                          */
 /* ================================================================== */
 
-const MIN_DATE = '2023-01-01';
-const MAX_DATE = '2025-12-31';
+/** ช่วงวันที่ที่ให้เลือก: ข้อมูลจริงมีตั้งแต่ปี 2022 จนถึงวันนี้ (คำนวณ max จากวันที่ปัจจุบัน) */
+const MIN_DATE = '2022-01-01';
+const TODAY = (() => {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+})();
+const MAX_DATE = TODAY;
 const PAGE_SIZE = 50;
 const MAX_ROWS = 100000;
 
@@ -54,9 +60,19 @@ const state = {
   session: null,
   place: null,
   events: [],
+  clusters: null,
+  orderTypes: [],
+  defaultClusterId: null,
+  risk: null,
+  districtId: null,
+  districtName: '',
+  riskClusterTouched: false,
+  riskScopeTouched: false,
 };
 
 let controller = null;
+let pendingSearch = false;
+let riskRequestId = 0;
 
 /* ================================================================== */
 /* DOM                                                                */
@@ -101,6 +117,25 @@ const el = {
   areaTitle: $('area-title'),
   areaDetail: $('area-detail'),
   areaChips: $('area-chips'),
+  areaStats: $('area-stats'),
+
+  themeToggle: $('theme-toggle'),
+  themeIcon: $('theme-icon'),
+  themeLabel: $('theme-label'),
+
+  mapCard: $('map-card'),
+  map: $('map'),
+  mapSub: $('map-sub'),
+  mapFit: $('map-fit'),
+
+  riskCard: $('risk-card'),
+  riskSub: $('risk-sub'),
+  riskCluster: $('risk-cluster'),
+  riskScope: $('risk-scope'),
+  riskOrder: $('risk-order'),
+  riskBody: $('risk-body'),
+  riskCount: $('risk-count'),
+  riskMapToggle: $('risk-map-toggle'),
 
   eventsCard: $('events-card'),
   eventsSub: $('events-sub'),
@@ -131,6 +166,36 @@ const el = {
   dialogBody: $('detail-body'),
   dialogClose: $('detail-close'),
 };
+
+/* ================================================================== */
+/* Theme (light / dark)                                               */
+/* ================================================================== */
+
+const THEME_KEY = 'itic-theme';
+
+function applyTheme(theme, { persist = true } = {}) {
+  const next = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+
+  el.themeIcon.textContent = next === 'dark' ? '☀️' : '🌙';
+  el.themeLabel.textContent = next === 'dark' ? 'โหมดสว่าง' : 'โหมดมืด';
+  el.themeToggle.title = next === 'dark' ? 'สลับเป็นโหมดสว่าง' : 'สลับเป็นโหมดมืด';
+  el.themeToggle.setAttribute('aria-pressed', String(next === 'dark'));
+
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      /* localStorage อาจถูกปิด */
+    }
+  }
+
+  if (mapState.ready) setTileTheme(next);
+}
+
+el.themeToggle.addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+});
 
 /* ================================================================== */
 /* Helpers                                                            */
@@ -246,6 +311,7 @@ function showApp(session) {
   el.appView.hidden = false;
   el.sessionInfo.hidden = false;
   el.sessionUser.textContent = session.username || 'ผู้ใช้';
+  loadClusters().catch((error) => console.warn('clusters:', error.message));
 }
 
 async function checkSession() {
@@ -334,6 +400,12 @@ async function loadProvinces() {
   el.province.value = '10';
 }
 
+const THAI_YEAR_OFFSET = 543;
+
+function buddhistYear(iso) {
+  return Number(String(iso).slice(0, 4)) + THAI_YEAR_OFFSET;
+}
+
 function setDefaultDates() {
   const end = MAX_DATE;
   const start = clampDate(addDays(end, -29));
@@ -346,6 +418,13 @@ function applyQuickRange(days) {
   let start;
   if (days === 'year') {
     start = `${end.slice(0, 4)}-01-01`;
+  } else if (/^\d{4}$/.test(String(days))) {
+    // ปีย้อนหลัง: ใช้ทั้งปี (ไม่เกินวันนี้)
+    start = `${days}-01-01`;
+    const yearEnd = `${days}-12-31`;
+    el.startDate.value = clampDate(start);
+    el.endDate.value = clampDate(yearEnd);
+    return;
   } else {
     start = clampDate(addDays(end, -(Number(days) - 1)));
   }
@@ -353,8 +432,50 @@ function applyQuickRange(days) {
   el.endDate.value = end;
 }
 
-document.querySelectorAll('[data-range]').forEach((button) => {
-  button.addEventListener('click', () => applyQuickRange(button.dataset.range));
+/** ตั้งค่า min/max ของช่องวันที่ + สร้างปุ่มลัดตามปีที่มีข้อมูล (2022 → ปีนี้) */
+function setupDateControls() {
+  for (const input of [el.startDate, el.endDate]) {
+    input.min = MIN_DATE;
+    input.max = MAX_DATE;
+  }
+
+  const group = el.startDate.closest('.filter-card') || document;
+  const row = group.querySelector('.date-chips') || document.querySelector('.date-chips');
+  if (!row) return;
+
+  const thisYear = Number(MAX_DATE.slice(0, 4));
+  const firstYear = Number(MIN_DATE.slice(0, 4));
+
+  for (const button of row.querySelectorAll('[data-range]')) {
+    if (button.dataset.range === 'year') {
+      button.textContent = `ทั้งปี ${thisYear + THAI_YEAR_OFFSET}`;
+      button.title = `1 ม.ค. – ${MAX_DATE} (ปี ${thisYear + THAI_YEAR_OFFSET})`;
+    }
+  }
+
+  // ปุ่มปีที่ผ่านมา (ล่าสุดก่อน) — สูงสุด 3 ปุ่มเพื่อไม่ให้แถวยาวเกิน
+  const previous = [];
+  for (let year = thisYear - 1; year >= firstYear && previous.length < 3; year -= 1) {
+    previous.push(year);
+  }
+  if (previous.length === 0) return;
+
+  for (const year of previous) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.dataset.range = String(year);
+    button.textContent = `ปี ${year + THAI_YEAR_OFFSET}`;
+    button.title = `1 ม.ค. – 31 ธ.ค. ${year + THAI_YEAR_OFFSET}`;
+    row.appendChild(button);
+  }
+}
+
+document.querySelectorAll('.date-chips').forEach((row) => {
+  row.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-range]');
+    if (button) applyQuickRange(button.dataset.range);
+  });
 });
 
 function syncAreaInputs() {
@@ -450,6 +571,23 @@ el.resetBtn.addEventListener('click', () => {
   state.events = [];
   el.eventsCard.hidden = true;
   el.eventsList.replaceChildren();
+  state.risk = null;
+  el.riskCard.hidden = true;
+  el.riskBody.replaceChildren();
+  el.riskCount.textContent = '';
+  state.districtId = null;
+  state.districtName = '';
+  el.areaStats.hidden = true;
+  el.areaStats.replaceChildren();
+  el.mapCard.hidden = true;
+  if (mapState.ready) {
+    mapState.accidents.clearLayers();
+    mapState.events.clearLayers();
+    mapState.risks.clearLayers();
+    mapState.pin.clearLayers();
+    mapState.pinMarker = null;
+    mapState.circle = null;
+  }
   setDefaultDates();
   setStatus('');
 });
@@ -502,6 +640,16 @@ function setSearchBusy(busy) {
   el.searchBtn.textContent = busy ? 'ยกเลิก' : 'ค้นหาข้อมูล';
   el.searchBtn.classList.toggle('btn-primary', !busy);
   el.searchBtn.classList.toggle('btn-ghost', busy);
+}
+
+/** เริ่มค้นหาใหม่ (ถ้ากำลังดึงอยู่ ให้ยกเลิกแล้วเริ่มใหม่หลังจบ) */
+function requestSearch() {
+  if (controller) {
+    pendingSearch = true;
+    controller.abort();
+    return;
+  }
+  runSearch();
 }
 
 async function runSearch() {
@@ -603,12 +751,25 @@ async function runSearch() {
       const place = state.place;
       const sameSpot =
         place && Math.abs(place.lat - query.point.lat) < 1e-4 && Math.abs(place.lon - query.point.lon) < 1e-4;
-      loadAreaInfo(query.point.lat, query.point.lon, query.buffer, rows.length, sameSpot ? place.name : '');
+      loadAreaInfo(query.point, query.buffer, rows.length, sameSpot ? place.name : '', query);
     } else {
       el.areaCard.hidden = true;
+      state.districtId = null;
+      state.districtName = '';
     }
 
     loadEvents(query, rows);
+
+    if (rows.length > 0) {
+      loadRisk(query);
+    } else {
+      state.risk = null;
+      el.riskCard.hidden = true;
+      renderRiskMarkers();
+    }
+
+    renderMapNow();
+    fitToResults();
   } catch (error) {
     if (error.name === 'AbortError') {
       setStatus('ยกเลิกการดึงข้อมูลแล้ว');
@@ -618,6 +779,11 @@ async function runSearch() {
   } finally {
     controller = null;
     setSearchBusy(false);
+
+    if (pendingSearch) {
+      pendingSearch = false;
+      runSearch();
+    }
   }
 }
 
@@ -637,11 +803,19 @@ function addAreaChip(text, extraClass = '') {
   el.areaChips.appendChild(chip);
 }
 
-function renderAreaChips(payload, lat, lon, buffer, count) {
+const THAI_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+
+function thaiDate(iso) {
+  const [y, m, d] = String(iso || '').split('-').map(Number);
+  if (!y || !m || !d) return String(iso || '');
+  return `${d} ${THAI_MONTHS[m - 1]} ${y + 543}`;
+}
+
+function renderAreaChips(payload, point, buffer, count) {
   el.areaChips.replaceChildren();
 
   addAreaChip(`พบ ${fmtNum(count)} รายการ · รัศมี ${fmtNum(buffer)} ม.`);
-  addAreaChip(`พิกัด ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
+  addAreaChip(`พิกัด ${point.lat.toFixed(6)}, ${point.lon.toFixed(6)}`);
 
   if (payload.blackspot && payload.blackspot.name) {
     const label = payload.blackspot.subName
@@ -650,32 +824,119 @@ function renderAreaChips(payload, lat, lon, buffer, count) {
     addAreaChip(label);
   }
 
-  if (payload.districtStats && payload.districtStats.districtName) {
-    addAreaChip(
-      `เขต/อำเภอ ${payload.districtStats.districtName}: ${fmtNum(payload.districtStats.totalAccident)} ครั้ง`
-    );
-  }
-
   if (payload.osmOk) addAreaChip('ชื่อสถานที่ © OpenStreetMap', 'attribution');
 }
 
-async function loadAreaInfo(lat, lon, buffer, count, preferredTitle = '') {
+function miniStat(label, value, metaText, metaNode) {
+  const box = document.createElement('div');
+  box.className = 'mini-stat';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'mini-label';
+  labelEl.textContent = label;
+
+  const valueEl = document.createElement('strong');
+  valueEl.textContent = value;
+
+  box.append(labelEl, valueEl);
+
+  if (metaNode) {
+    box.appendChild(metaNode);
+  } else if (metaText) {
+    const meta = document.createElement('span');
+    meta.className = 'mini-meta';
+    meta.textContent = metaText;
+    box.appendChild(meta);
+  }
+
+  return box;
+}
+
+function renderAreaStats(payload, summary, buffer) {
+  el.areaStats.replaceChildren();
+  const cards = [];
+
+  if (summary) {
+    cards.push(
+      miniStat(
+        `ในรัศมี ${fmtNum(summary.radius || buffer)} ม. · ${thaiDate(summary.startDate)}–${thaiDate(summary.endDate)}`,
+        fmtNum(summary.totalAccident),
+        `เสียชีวิต ${fmtNum(summary.totalDeath)} · บาดเจ็บ ${fmtNum(summary.totalInjured)}`
+      )
+    );
+  }
+
+  const district = payload.districtStats;
+  if (district && district.districtName) {
+    const meta = document.createElement('span');
+    meta.className = 'mini-meta';
+
+    if (district.rankInProvince != null) {
+      meta.append(`อันดับ ${fmtNum(district.rankInProvince)} ในจังหวัด`);
+      if (district.levelInProvince) meta.append(levelBadge(district.levelInProvince));
+    }
+    if (district.rankInCluster != null) {
+      meta.append(`· อันดับ ${fmtNum(district.rankInCluster)} ในชุดข้อมูล`);
+    }
+
+    cards.push(miniStat(`เขต/อำเภอ ${district.districtName}`, fmtNum(district.totalAccident), null, meta));
+  }
+
+  if (cards.length === 0) {
+    el.areaStats.hidden = true;
+    return;
+  }
+
+  el.areaStats.hidden = false;
+  el.areaStats.append(...cards);
+}
+
+async function loadAreaInfo(point, buffer, count, preferredTitle, query) {
   el.areaCard.hidden = false;
   el.areaTitle.textContent = preferredTitle || 'กำลังระบุชื่อบริเวณ…';
   el.areaDetail.textContent = '';
   el.areaChips.replaceChildren();
+  el.areaStats.hidden = true;
+  el.areaStats.replaceChildren();
 
-  try {
-    const payload = await api(`/api/area?lat=${lat}&lon=${lon}`);
-    el.areaTitle.textContent = preferredTitle || payload.title || 'ไม่ทราบชื่อบริเวณ';
-    el.areaDetail.textContent =
-      payload.detail || [payload.district, payload.province].filter(Boolean).join(' · ');
-    renderAreaChips(payload, lat, lon, buffer, count);
-  } catch (error) {
-    el.areaTitle.textContent = preferredTitle || 'บริเวณที่เลือก';
-    el.areaDetail.textContent = error.message;
-    renderAreaChips({}, lat, lon, buffer, count);
+  const areaParams = new URLSearchParams({ lat: point.lat, lon: point.lon });
+  const summaryParams = new URLSearchParams({
+    lat: point.lat,
+    lon: point.lon,
+    radius: String(buffer),
+    start_date: query.start_date,
+    end_date: query.end_date,
+  });
+
+  const [areaResult, summaryResult] = await Promise.allSettled([
+    api(`/api/area?${areaParams.toString()}`),
+    api(`/api/area-summary?${summaryParams.toString()}`),
+  ]);
+
+  const payload = areaResult.status === 'fulfilled' ? areaResult.value : {};
+  const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+
+  if (payload.districtStats && payload.districtStats.districtId) {
+    const nextDistrictId = payload.districtStats.districtId;
+    // ถ้าย้ายไปอำเภออื่น ให้กลับไปใช้ค่าอัตโนมัติ (ไม่ค้างตัวเลือกเดิมของผู้ใช้)
+    if (String(nextDistrictId) !== String(state.districtId)) state.riskScopeTouched = false;
+    state.districtId = nextDistrictId;
+    state.districtName = payload.districtStats.districtName || '';
   }
+
+  el.areaTitle.textContent = preferredTitle || payload.title || 'ไม่ทราบชื่อบริเวณ';
+  el.areaDetail.textContent =
+    payload.detail || [payload.district, payload.province].filter(Boolean).join(' · ');
+
+  if (areaResult.status === 'rejected') {
+    el.areaDetail.textContent = areaResult.reason.message;
+  }
+
+  renderAreaChips(payload, point, buffer, count);
+  renderAreaStats(payload, summary, buffer);
+
+  // เมื่อรู้รหัสอำเภอแล้ว ให้สลับพื้นที่ของแผงจุดเสี่ยงเป็นระดับอำเภอ (ถ้าผู้ใช้ยังไม่เลือกเอง)
+  applyDistrictScope();
 }
 
 /* ================================================================== */
@@ -779,8 +1040,11 @@ async function loadEvents(query, rows) {
     const payload = await api(`/api/events?${params.toString()}`);
     state.events = payload.data || [];
     renderEvents(state.events, scope);
+    renderEventMarkers();
   } catch (error) {
+    state.events = [];
     el.eventsCard.hidden = true;
+    renderEventMarkers();
     console.warn('events:', error.message);
   }
 }
@@ -812,6 +1076,787 @@ el.eventsExport.addEventListener('click', () => {
   const stamp = new Date().toISOString().slice(0, 10);
   downloadCSV(`longdo_events_${stamp}.csv`, header, rows);
   setStatus(`ส่งออกเหตุการณ์ปัจจุบัน ${fmtNum(rows.length)} รายการแล้ว`);
+});
+
+/* ================================================================== */
+/* Map (Leaflet + CARTO basemaps)                                     */
+/* ================================================================== */
+
+const CARTO_KEY = 'cb1_3106_1_c281e24bf3fb043df74a3b66';
+
+const TILE_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' +
+  ' · &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
+
+const TILE_URLS = {
+  light: `https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`,
+  dark: `https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`,
+};
+
+const MAP_MAX_ACCIDENTS = 4000;
+const MAP_MAX_RISKS = 400;
+const RISK_TABLE_LIMIT = 200;
+
+const SEVERITY_COLORS = { death: '#dc2626', injured: '#f59e0b', none: '#0284c7' };
+
+const EVENT_COLORS = {
+  flood: '#0284c7',
+  fire: '#dc2626',
+  accident: '#be123c',
+  roadclosed: '#475569',
+  diversion: '#d97706',
+  carbreakdown: '#ea580c',
+  earthquake: '#7c3aed',
+  event: '#4f46e5',
+  construction: '#a16207',
+  protest: '#db2777',
+  other: '#64748b',
+};
+
+const LEVEL_LABELS = { high: 'มาก', medium: 'ปานกลาง', low: 'น้อย', unknown: '—' };
+const LEVEL_COLORS = { high: '#dc2626', medium: '#f59e0b', low: '#16a34a' };
+
+const mapState = {
+  map: null,
+  ready: false,
+  tiles: null,
+  accidents: null,
+  events: null,
+  risks: null,
+  pin: null,
+  pinMarker: null,
+  circle: null,
+  showRisks: true,
+  located: 0,
+  shown: 0,
+};
+
+function initMap() {
+  if (mapState.ready) return true;
+
+  if (typeof L === 'undefined') {
+    el.mapSub.textContent = 'โหลดไลบรารีแผนที่ (Leaflet) ไม่สำเร็จ';
+    return false;
+  }
+
+  const map = L.map(el.map, {
+    center: [13.7563, 100.5018],
+    zoom: 11,
+    preferCanvas: true,
+    zoomControl: true,
+    worldCopyJump: true,
+  });
+
+  // ลำดับชั้น: จุดเสี่ยง (วงแหวน) อยู่ล่างสุด → เหตุการณ์ → อุบัติเหตุ → หมุดค้นหา
+  mapState.risks = L.layerGroup().addTo(map);
+  mapState.events = L.layerGroup().addTo(map);
+  mapState.accidents = L.layerGroup().addTo(map);
+  mapState.pin = L.layerGroup().addTo(map);
+  mapState.map = map;
+
+  setTileTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+
+  map.on('click', (event) => {
+    movePin(event.latlng.lat, event.latlng.lng, { search: true });
+  });
+
+  mapState.ready = true;
+  return true;
+}
+
+function setTileTheme(theme) {
+  if (!mapState.map) return;
+
+  const layer = L.tileLayer(TILE_URLS[theme] || TILE_URLS.light, {
+    attribution: TILE_ATTRIBUTION,
+    maxZoom: 20,
+    maxNativeZoom: 20,
+    detectRetina: true,
+  });
+
+  layer.addTo(mapState.map);
+  if (mapState.tiles) mapState.map.removeLayer(mapState.tiles);
+  mapState.tiles = layer;
+}
+
+function accidentLatLng(accident) {
+  const location = Array.isArray(accident.location) ? accident.location : [];
+  const [lon, lat] = location;
+  return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
+}
+
+function severityOf(accident) {
+  if ((Number(accident.death) || 0) > 0) return 'death';
+  if ((Number(accident.injured) || 0) > 0) return 'injured';
+  return 'none';
+}
+
+function pinIcon() {
+  return L.divIcon({
+    className: 'map-pin',
+    html: '<span class="map-pin-head"></span>',
+    iconSize: [26, 34],
+    iconAnchor: [13, 30],
+  });
+}
+
+/* ------------------------------ popups ------------------------------ */
+
+function popupBox(children) {
+  const box = document.createElement('div');
+  box.className = 'map-popup';
+  box.append(...children.filter(Boolean));
+  return box;
+}
+
+function popupLine(text, className = 'muted') {
+  if (!text) return null;
+  const p = document.createElement('p');
+  p.className = className;
+  p.textContent = text;
+  return p;
+}
+
+function accidentPopup(accident) {
+  const { date, time } = splitDatetime(accident.datetime);
+  const title = document.createElement('strong');
+  title.textContent = `${date || '—'} ${time || ''}`.trim();
+
+  const meta = popupLine(
+    [accident.subdistrict, accident.district, SOURCE_LABELS[accident.__source]].filter(Boolean).join(' · ')
+  );
+  const stats = popupLine(`เสียชีวิต ${fmtNum(accident.death)} · บาดเจ็บ ${fmtNum(accident.injured)}`);
+
+  const actions = document.createElement('div');
+  actions.className = 'popup-actions';
+  const detail = document.createElement('button');
+  detail.type = 'button';
+  detail.className = 'btn btn-outline btn-sm';
+  detail.textContent = 'ดูรายละเอียด';
+  detail.addEventListener('click', () => {
+    mapState.map.closePopup();
+    openDetail(accident);
+  });
+  actions.appendChild(detail);
+
+  return popupBox([title, meta, stats, actions]);
+}
+
+function eventPopup(event) {
+  const title = document.createElement('strong');
+  title.textContent = event.title || '(ไม่มีชื่อเหตุการณ์)';
+
+  const parts = [event.typeLabel, formatEventTime(event.start)];
+  if (Number.isFinite(event.distance)) parts.push(formatDistance(event.distance));
+
+  const desc = popupLine(String(event.description || '').replace(/\s+/g, ' ').slice(0, 180));
+  return popupBox([title, popupLine(parts.filter(Boolean).join(' · ')), desc]);
+}
+
+function riskPopup(spot, level) {
+  const title = document.createElement('strong');
+  title.textContent = spot.name || '(ไม่มีชื่อจุดเสี่ยง)';
+
+  const sub = popupLine([spot.sub_name, spot.road_name, spot.district].filter(Boolean).join(' · '));
+  const stats = popupLine(
+    `อุบัติเหตุ ${fmtNum(spot.total)} · เสียชีวิต ${fmtNum(spot.death)} · บาดเจ็บ ${fmtNum(spot.injured)}`
+  );
+
+  const badge = document.createElement('span');
+  badge.className = `level ${level}`;
+  badge.textContent = LEVEL_LABELS[level] || '—';
+
+  const actions = document.createElement('div');
+  actions.className = 'popup-actions';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-outline btn-sm';
+  btn.textContent = 'ค้นหาอุบัติเหตุรอบจุดนี้';
+  btn.addEventListener('click', () => {
+    const [lon, lat] = spot.location || [];
+    mapState.map.closePopup();
+    movePin(lat, lon, { search: true });
+    mapState.map.setView([lat, lon], 16);
+  });
+  actions.appendChild(btn);
+
+  return popupBox([title, sub, stats, badge, actions]);
+}
+
+/* ------------------------------ layers ------------------------------ */
+
+function renderMap() {
+  if (!initMap()) return;
+
+  const rows = state.view;
+  const point = state.query && state.query.point ? state.query.point : null;
+  const buffer = Number(state.query && state.query.buffer) || 0;
+
+  if (rows.length === 0 && !point) {
+    el.mapCard.hidden = true;
+    return;
+  }
+
+  el.mapCard.hidden = false;
+  mapState.map.invalidateSize();
+
+  mapState.accidents.clearLayers();
+  mapState.pin.clearLayers();
+  mapState.pinMarker = null;
+  mapState.circle = null;
+
+  const located = [];
+  for (const accident of rows) {
+    const ll = accidentLatLng(accident);
+    if (ll) located.push({ accident, ll });
+  }
+
+  // ให้จุดที่มีผู้เสียชีวิตอยู่บนสุดเสมอ (canvas วาดทับกันตามลำดับ)
+  const rank = { death: 0, injured: 1, none: 2 };
+  located.sort((a, b) => {
+    const diff = rank[severityOf(a.accident)] - rank[severityOf(b.accident)];
+    if (diff !== 0) return diff;
+    return String(b.accident.datetime).localeCompare(String(a.accident.datetime));
+  });
+
+  const shown = located.slice(0, MAP_MAX_ACCIDENTS);
+  for (const { accident, ll } of shown) {
+    L.circleMarker(ll, {
+      radius: 5,
+      weight: 1,
+      color: '#ffffff',
+      opacity: 0.85,
+      fillColor: SEVERITY_COLORS[severityOf(accident)],
+      fillOpacity: 0.85,
+    })
+      .bindPopup(() => accidentPopup(accident), { minWidth: 220 })
+      .addTo(mapState.accidents);
+  }
+
+  mapState.located = located.length;
+  mapState.shown = shown.length;
+
+  if (point) {
+    const latlng = [point.lat, point.lon];
+
+    if (buffer > 0) {
+      mapState.circle = L.circle(latlng, {
+        radius: buffer,
+        color: '#0f766e',
+        weight: 1.5,
+        opacity: 0.8,
+        fillColor: '#0f766e',
+        fillOpacity: 0.07,
+        dashArray: '5 5',
+      }).addTo(mapState.pin);
+    }
+
+    mapState.pinMarker = L.marker(latlng, {
+      draggable: true,
+      keyboard: false,
+      title: 'ลากเพื่อย้ายจุดค้นหา',
+      icon: pinIcon(),
+      zIndexOffset: 1200,
+    }).addTo(mapState.pin);
+
+    mapState.pinMarker.on('dragend', () => {
+      const pos = mapState.pinMarker.getLatLng();
+      movePin(pos.lat, pos.lng, { search: true });
+    });
+  }
+
+  renderEventMarkers();
+  renderRiskMarkers();
+  updateMapSummary();
+}
+
+function renderEventMarkers() {
+  if (!mapState.ready) return;
+
+  mapState.events.clearLayers();
+  for (const event of state.events) {
+    if (!Number.isFinite(event.lat) || !Number.isFinite(event.lon)) continue;
+    L.circleMarker([event.lat, event.lon], {
+      radius: 8,
+      weight: 2,
+      color: '#ffffff',
+      opacity: 0.95,
+      fillColor: EVENT_COLORS[event.type] || EVENT_COLORS.other,
+      fillOpacity: 0.95,
+    })
+      .bindPopup(() => eventPopup(event), { minWidth: 220 })
+      .addTo(mapState.events);
+  }
+  updateMapSummary();
+}
+
+function renderRiskMarkers() {
+  if (!mapState.ready) return;
+
+  mapState.risks.clearLayers();
+  if (!mapState.showRisks || !state.risk) {
+    updateMapSummary();
+    return;
+  }
+
+  const risk = state.risk;
+  for (const spot of risk.rows.slice(0, MAP_MAX_RISKS)) {
+    const [lon, lat] = spot.location || [];
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    const level = riskLevel(spot, risk);
+    // วาดเป็นวงแหวน (ไม่ทึบ) และย่อขนาดตามระดับ เพื่อไม่ให้กลืนกับจุดอุบัติเหตุที่อยู่ชั้นบน
+    const style =
+      level === 'high'
+        ? { radius: 9, weight: 2.5, opacity: 0.95, fillOpacity: 0.2 }
+        : level === 'medium'
+          ? { radius: 7.5, weight: 2, opacity: 0.85, fillOpacity: 0.14 }
+          : { radius: 5.5, weight: 1, opacity: 0.5, fillOpacity: 0.06 };
+
+    L.circleMarker([lat, lon], {
+      ...style,
+      color: LEVEL_COLORS[level] || '#0f766e',
+      fillColor: LEVEL_COLORS[level] || '#0f766e',
+    })
+      .bindPopup(() => riskPopup(spot, level), { minWidth: 230 })
+      .addTo(mapState.risks);
+  }
+  updateMapSummary();
+}
+
+function updateMapSummary() {
+  const total = state.view.length;
+  const parts = [`แสดง ${fmtNum(mapState.shown)} จาก ${fmtNum(total)} รายการ`];
+  if (total > MAP_MAX_ACCIDENTS) parts.push(`จำกัด ${fmtNum(MAP_MAX_ACCIDENTS)} จุดเพื่อความเร็ว`);
+  if (state.events.length) parts.push(`เหตุการณ์ปัจจุบัน ${fmtNum(state.events.length)}`);
+  if (state.risk && state.risk.rows.length && mapState.showRisks) {
+    const drawn = Math.min(state.risk.rows.length, MAP_MAX_RISKS);
+    parts.push(`จุดเสี่ยง ${fmtNum(drawn)}${state.risk.rows.length > drawn ? `/${fmtNum(state.risk.rows.length)}` : ''}`);
+  }
+  el.mapSub.textContent = parts.join(' · ');
+}
+
+let mapRenderTimer = null;
+
+/** อัปเดตแผนที่แบบ debounce (เรียกจาก render() ทุกครั้งที่ผลลัพธ์เปลี่ยน) */
+function scheduleMapRender() {
+  clearTimeout(mapRenderTimer);
+  mapRenderTimer = setTimeout(() => {
+    if (state.rows.length > 0 || (state.query && state.query.point)) renderMap();
+  }, 200);
+}
+
+/** วาดแผนที่ทันที (ใช้หลังค้นหาเสร็จ เพื่อ fit bounds ได้ถูกจังหวะ) */
+function renderMapNow() {
+  clearTimeout(mapRenderTimer);
+  renderMap();
+}
+
+function fitToResults() {
+  if (!mapState.ready) return;
+
+  const bounds = L.latLngBounds([]);
+
+  for (const accident of state.view) {
+    const ll = accidentLatLng(accident);
+    if (ll) bounds.extend(ll);
+  }
+
+  if (state.query && state.query.point) {
+    bounds.extend([state.query.point.lat, state.query.point.lon]);
+  }
+
+  if (!bounds.isValid() && state.risk) {
+    for (const spot of state.risk.rows) {
+      const [lon, lat] = spot.location || [];
+      if (Number.isFinite(lat) && Number.isFinite(lon)) bounds.extend([lat, lon]);
+    }
+  }
+
+  if (!bounds.isValid()) return;
+
+  const ne = bounds.getNorthEast();
+  const sw = bounds.getSouthWest();
+  const samePoint = Math.abs(ne.lat - sw.lat) < 1e-6 && Math.abs(ne.lng - sw.lng) < 1e-6;
+
+  if (samePoint) {
+    mapState.map.setView(bounds.getCenter(), 16);
+  } else {
+    mapState.map.fitBounds(bounds, { padding: [26, 26], maxZoom: 16 });
+  }
+}
+
+/** ย้ายหมุดค้นหา (จากลากหมุด / คลิกแผนที่ / popup) */
+function movePin(lat, lon, { search = false } = {}) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+
+  el.lat.value = Number(lat).toFixed(6);
+  el.lon.value = Number(lon).toFixed(6);
+
+  if (!el.useArea.checked) {
+    el.useArea.checked = true;
+    syncAreaInputs();
+  }
+
+  state.place = null;
+
+  if (mapState.pinMarker) mapState.pinMarker.setLatLng([lat, lon]);
+  if (mapState.circle) mapState.circle.setLatLng([lat, lon]);
+
+  if (search) requestSearch();
+}
+
+el.mapFit.addEventListener('click', fitToResults);
+
+el.buffer.addEventListener('change', () => {
+  const radius = Number(el.buffer.value);
+  if (mapState.circle && Number.isFinite(radius) && radius > 0) {
+    mapState.circle.setRadius(radius);
+  }
+  if (state.query && state.query.point) requestSearch();
+});
+
+for (const input of [el.lat, el.lon]) {
+  input.addEventListener('change', () => {
+    const lat = Number(el.lat.value);
+    const lon = Number(el.lon.value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    state.place = null;
+    if (mapState.pinMarker) mapState.pinMarker.setLatLng([lat, lon]);
+    if (mapState.circle) mapState.circle.setLatLng([lat, lon]);
+  });
+}
+
+/* ================================================================== */
+/* Blackspot panel                                                    */
+/* ================================================================== */
+
+function clusterById(id) {
+  return (state.clusters || []).find((cluster) => cluster.id === Number(id)) || null;
+}
+
+/**
+ * ระดับความรุนแรงของจุดเสี่ยง (แดง/เหลือง/เขียว)
+ * API ไม่ได้ส่ง level มาในรายการ get_list จึงคำนวณเองจากอันดับ (rank) ภายในรายการที่กรองอยู่:
+ *   อันดับต้น ๆ = มาก (สูงสุด 10 อันดับแรก หรือ 5% ของรายการ), ถัดมา = ปานกลาง (สูงสุด 50 อันดับ หรือ 20%)
+ */
+function riskLevel(spot, risk) {
+  if (!risk || !risk.rows || risk.rows.length === 0) return 'unknown';
+
+  const total = risk.rows.length;
+  const rank = Number(spot.rank);
+  if (!Number.isFinite(rank) || rank <= 0) return 'unknown';
+
+  const highCut = Math.min(10, Math.max(3, Math.ceil(total * 0.05)));
+  const mediumCut = Math.min(50, Math.max(10, Math.ceil(total * 0.2)));
+
+  if (rank <= highCut) return 'high';
+  if (rank <= mediumCut) return 'medium';
+  return 'low';
+}
+
+function levelBadge(level) {
+  const key = String(level || '').toLowerCase();
+  const badge = document.createElement('span');
+  badge.className = `level ${['high', 'medium', 'low'].includes(key) ? key : 'unknown'}`;
+  badge.textContent = LEVEL_LABELS[key] || level || '—';
+  return badge;
+}
+
+async function loadClusters() {
+  if (state.clusters) return state.clusters;
+
+  const payload = await api('/api/clusters');
+  state.clusters = payload.data || [];
+  state.orderTypes = payload.orderTypes || [];
+  state.defaultClusterId = payload.defaultId;
+
+  el.riskCluster.replaceChildren();
+  for (const cluster of state.clusters) {
+    const option = document.createElement('option');
+    option.value = String(cluster.id);
+    const empty = cluster.max && Number(cluster.max.total) === 0;
+    const years =
+      cluster.startDate && cluster.endDate
+        ? ` (${cluster.startDate.slice(0, 4)}–${cluster.endDate.slice(0, 4)})`
+        : '';
+    option.textContent = `${cluster.name}${years}${empty ? ' · ยังไม่มีข้อมูล' : ''}`;
+    option.title = cluster.startDate && cluster.endDate ? `${cluster.startDate} ถึง ${cluster.endDate}` : '';
+    el.riskCluster.appendChild(option);
+  }
+  if (payload.defaultId != null) el.riskCluster.value = String(payload.defaultId);
+
+  el.riskOrder.replaceChildren();
+  for (const type of state.orderTypes) {
+    const option = document.createElement('option');
+    option.value = String(type.id);
+    option.textContent = type.label;
+    el.riskOrder.appendChild(option);
+  }
+
+  const current = clusterById(el.riskCluster.value);
+  el.riskOrder.value = String((current && current.defaultOrderId) || 1);
+
+  return state.clusters;
+}
+
+/** ตัวเลือกพื้นที่: ทั้งจังหวัด (2 หลัก) และอำเภอของจุดที่ค้นหา (4 หลัก) */
+function renderRiskScopes() {
+  const query = state.query;
+  if (!query) return;
+
+  const options = [
+    {
+      value: String(query.geocode).padStart(2, '0'),
+      label: `ทั้งจังหวัด (${query.provinceName || query.geocode})`,
+    },
+  ];
+
+  if (state.districtId) {
+    options.push({
+      value: String(state.districtId),
+      label: `อำเภอ/เขต ${state.districtName || state.districtId}`,
+    });
+  }
+
+  const current = el.riskScope.value;
+  el.riskScope.replaceChildren();
+
+  for (const item of options) {
+    const option = document.createElement('option');
+    option.value = item.value;
+    option.textContent = item.label;
+    el.riskScope.appendChild(option);
+  }
+
+  if (options.some((item) => item.value === current)) {
+    el.riskScope.value = current;
+  }
+}
+
+/** เลือก cluster ที่ทับซ้อนกับช่วงวันที่ค้นหามากที่สุด (ข้ามชุดที่ยังไม่มีข้อมูล) */
+function pickClusterForRange(query) {
+  const list = (state.clusters || []).filter(
+    (cluster) => cluster.startDate && cluster.endDate && (!cluster.max || Number(cluster.max.total) > 0)
+  );
+  if (list.length === 0) return null;
+
+  const day = 86400000;
+  const toTime = (iso) => Date.parse(`${iso}T00:00:00Z`);
+  let best = null;
+  let bestScore = -1;
+
+  for (const cluster of list) {
+    const start = Math.max(toTime(cluster.startDate), toTime(query.start_date));
+    const end = Math.min(toTime(cluster.endDate), toTime(query.end_date));
+    const overlap = end >= start ? (end - start) / day + 1 : 0;
+    // ถ้าไม่ทับซ้อนเลย ให้ชุดที่สิ้นสุดล่าสุดเป็นตัวเลือกสำรอง (ค่าน้อยกว่า 1 วันเสมอ)
+    const score = overlap > 0 ? overlap : toTime(cluster.endDate) / day / 100000;
+    if (score > bestScore) {
+      bestScore = score;
+      best = cluster;
+    }
+  }
+  return best;
+}
+
+async function loadRisk(query) {
+  if (!query) return;
+
+  const requestId = ++riskRequestId;
+
+  el.riskCard.hidden = false;
+  el.riskSub.textContent = 'กำลังดึงรายการจุดเสี่ยง…';
+  el.riskBody.replaceChildren();
+  el.riskCount.textContent = '';
+  state.risk = null;
+
+  try {
+    await loadClusters();
+    if (requestId !== riskRequestId) return;
+    renderRiskScopes();
+
+    // เลือก cluster ที่ตรงกับช่วงวันที่ค้นหาให้อัตโนมัติ (ถ้าผู้ใช้ยังไม่เลือกเอง)
+    if (!state.riskClusterTouched) {
+      const best = pickClusterForRange(query);
+      if (best) el.riskCluster.value = String(best.id);
+      const current = clusterById(el.riskCluster.value);
+      if (current) el.riskOrder.value = String(current.defaultOrderId || 1);
+    }
+
+    const clusterId = el.riskCluster.value;
+    const districtId = el.riskScope.value;
+    const orderTypeId = el.riskOrder.value;
+
+    const params = new URLSearchParams({
+      cluster_id: clusterId,
+      district_id: districtId,
+      order_type_id: orderTypeId,
+      all: '1',
+    });
+
+    const payload = await api(`/api/blackspots?${params.toString()}`);
+    if (requestId !== riskRequestId) return;
+
+    state.risk = {
+      clusterId: Number(clusterId),
+      districtId,
+      orderTypeId: Number(orderTypeId),
+      rows: payload.data || [],
+      total: payload.total || 0,
+      truncated: Boolean(payload.truncated),
+    };
+
+    renderRiskTable();
+    renderRiskMarkers();
+  } catch (error) {
+    if (requestId !== riskRequestId) return;
+    el.riskSub.textContent = error.message;
+    el.riskCard.hidden = false;
+  }
+}
+
+/** ใช้พื้นที่ระดับอำเภอเมื่อรู้รหัสอำเภอจากพิกัดที่ค้นหา */
+function applyDistrictScope() {
+  if (!state.districtId || state.riskScopeTouched || !state.query) return;
+
+  renderRiskScopes();
+  if (el.riskScope.value !== String(state.districtId)) {
+    el.riskScope.value = String(state.districtId);
+    loadRisk(state.query);
+  }
+}
+
+function renderRiskTable() {
+  const risk = state.risk;
+  el.riskBody.replaceChildren();
+
+  if (!risk || risk.rows.length === 0) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.className = 'risk-empty';
+    td.textContent = 'ไม่พบจุดเสี่ยงในพื้นที่นี้';
+    tr.appendChild(td);
+    el.riskBody.appendChild(tr);
+    el.riskCount.textContent = '';
+    el.riskSub.textContent = 'ไม่พบจุดเสี่ยงในพื้นที่ที่เลือก';
+    return;
+  }
+
+  const cluster = clusterById(risk.clusterId);
+  const scopeLabel = el.riskScope.selectedOptions[0] ? el.riskScope.selectedOptions[0].textContent : '';
+  const orderLabel = el.riskOrder.selectedOptions[0] ? el.riskOrder.selectedOptions[0].textContent : '';
+
+  const subParts = [cluster ? cluster.name : '', scopeLabel, `เรียงตาม${orderLabel}`].filter(Boolean);
+  if (cluster && cluster.startDate && cluster.endDate && state.query) {
+    const overlaps = cluster.startDate <= state.query.end_date && cluster.endDate >= state.query.start_date;
+    if (!overlaps) {
+      subParts.push(`⚠ ชุดข้อมูลครอบคลุม ${cluster.startDate} ถึง ${cluster.endDate}`);
+    }
+  }
+  el.riskSub.textContent = subParts.join(' · ');
+
+  const fragment = document.createDocumentFragment();
+  for (const spot of risk.rows.slice(0, RISK_TABLE_LIMIT)) {
+    fragment.appendChild(riskRow(spot, risk));
+  }
+  el.riskBody.replaceChildren(fragment);
+
+  const shown = Math.min(risk.rows.length, RISK_TABLE_LIMIT);
+  const parts = [
+    risk.rows.length > shown
+      ? `แสดง ${fmtNum(shown)} จาก ${fmtNum(risk.rows.length)} จุดเสี่ยง`
+      : `ทั้งหมด ${fmtNum(risk.rows.length)} จุดเสี่ยง`,
+  ];
+  if (risk.truncated) parts.push('ตัดที่ 5,000 อันดับแรก');
+  el.riskCount.textContent = parts.join(' · ');
+}
+
+function riskRow(spot, risk) {
+  const level = riskLevel(spot, risk);
+
+  const tr = document.createElement('tr');
+  tr.title = 'คลิกเพื่อดูบนแผนที่';
+  tr.addEventListener('click', () => focusRisk(spot));
+
+  const rank = document.createElement('td');
+  rank.className = 'risk-rank';
+  rank.textContent = fmtNum(spot.rank);
+
+  const nameCell = document.createElement('td');
+  const name = document.createElement('span');
+  name.className = 'risk-name';
+  name.textContent = spot.name || '—';
+  nameCell.appendChild(name);
+
+  const subText = [spot.sub_name, spot.road_name].filter(Boolean).join(' · ');
+  if (subText) {
+    const sub = document.createElement('span');
+    sub.className = 'risk-sub';
+    sub.textContent = subText;
+    nameCell.appendChild(sub);
+  }
+
+  const district = document.createElement('td');
+  district.textContent = spot.district || '—';
+
+  const total = document.createElement('td');
+  total.className = 'num';
+  total.textContent = fmtNum(spot.total);
+
+  const death = document.createElement('td');
+  death.className = 'num';
+  death.textContent = fmtNum(spot.death);
+
+  const injured = document.createElement('td');
+  injured.className = 'num';
+  injured.textContent = fmtNum(spot.injured);
+
+  const levelCell = document.createElement('td');
+  const badge = levelBadge(level);
+  badge.title = 'คำนวณจากอันดับในรายการที่กรองอยู่ (ไม่ใช่ค่าจาก API)';
+  levelCell.appendChild(badge);
+
+  tr.append(rank, nameCell, district, total, death, injured, levelCell);
+  return tr;
+}
+
+function focusRisk(spot) {
+  const [lon, lat] = spot.location || [];
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  if (!initMap()) return;
+
+  el.mapCard.hidden = false;
+  mapState.map.invalidateSize();
+  mapState.map.setView([lat, lon], 17, { animate: true });
+
+  const level = riskLevel(spot, state.risk);
+  L.popup({ minWidth: 230 })
+    .setLatLng([lat, lon])
+    .setContent(riskPopup(spot, level))
+    .openOn(mapState.map);
+
+  el.mapCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+el.riskCluster.addEventListener('change', () => {
+  state.riskClusterTouched = true;
+  const cluster = clusterById(el.riskCluster.value);
+  if (cluster) el.riskOrder.value = String(cluster.defaultOrderId || 1);
+  loadRisk(state.query);
+});
+
+el.riskScope.addEventListener('change', () => {
+  state.riskScopeTouched = true;
+  loadRisk(state.query);
+});
+el.riskOrder.addEventListener('change', () => loadRisk(state.query));
+
+el.riskMapToggle.addEventListener('click', () => {
+  mapState.showRisks = !mapState.showRisks;
+  el.riskMapToggle.textContent = mapState.showRisks ? 'ซ่อนจุดเสี่ยงบนแผนที่' : 'แสดงจุดเสี่ยงบนแผนที่';
+  renderRiskMarkers();
 });
 
 /* ================================================================== */
@@ -884,6 +1929,7 @@ function applyFilters() {
 
 function render() {
   applyFilters();
+  scheduleMapRender();
 
   const rows = state.view;
   const hasRows = rows.length > 0;
@@ -1281,6 +2327,8 @@ el.exportDetailBtn.addEventListener('click', () => {
 /* ================================================================== */
 
 (async function init() {
+  applyTheme(document.documentElement.dataset.theme || 'light', { persist: false });
+  setupDateControls();
   setDefaultDates();
   await loadProvinces();
 

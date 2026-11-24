@@ -18,7 +18,7 @@
       })();
     </script>
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="styles.css?v=2" />
+    <link rel="stylesheet" href="styles.css?v=5" />
   </head>
   <body>
     <header class="topbar">
@@ -73,7 +73,7 @@
         <form id="filter-form" class="card filter-card" novalidate>
           <div class="card-head">
             <h2>เงื่อนไขการค้นหา</h2>
-            <div class="quick-ranges">
+            <div class="quick-ranges date-chips">
               <button type="button" class="chip" data-range="7">7 วันล่าสุด</button>
               <button type="button" class="chip" data-range="30">30 วันล่าสุด</button>
               <button type="button" class="chip" data-range="90">90 วันล่าสุด</button>
@@ -108,12 +108,12 @@
 
             <label class="field">
               <span>วันที่เริ่มต้น</span>
-              <input id="start_date" type="date" min="2023-01-01" max="2025-12-31" required />
+              <input id="start_date" type="date" min="2022-01-01" required />
             </label>
 
             <label class="field">
               <span>วันที่สิ้นสุด</span>
-              <input id="end_date" type="date" min="2023-01-01" max="2025-12-31" required />
+              <input id="end_date" type="date" min="2022-01-01" required />
             </label>
 
             <label class="field">
@@ -189,6 +189,7 @@
               <h3 id="area-title">—</h3>
               <p id="area-detail" class="muted"></p>
               <div id="area-chips" class="area-chips"></div>
+              <div id="area-stats" class="area-stats" hidden></div>
             </div>
           </div>
 
@@ -207,12 +208,59 @@
               <div class="map-legend">
                 <span class="legend-item"><i class="legend-dot dot-death"></i>เสียชีวิต</span>
                 <span class="legend-item"><i class="legend-dot dot-injured"></i>บาดเจ็บ</span>
-                <span class="legend-item"><i class="legend-dot dot-none"></i>ไม่มีผู้บาดเจ็บ</span>
+                <span class="legend-item"><i class="legend-dot dot-none"></i>ไม่มี/ไม่ระบุผู้บาดเจ็บ</span>
                 <span class="legend-item"><i class="legend-dot dot-event"></i>เหตุการณ์ปัจจุบัน</span>
+                <span class="legend-item"><i class="legend-dot dot-risk"></i>จุดเสี่ยง (แหวน)</span>
                 <span class="legend-item"><i class="legend-dot dot-pin"></i>จุดค้นหา</span>
               </div>
               <span class="map-hint">ลากหมุด หรือคลิกบนแผนที่เพื่อย้ายจุดค้นหา</span>
             </div>
+          </div>
+
+          <div class="card risk-card" id="risk-card" hidden>
+            <div class="risk-head">
+              <div>
+                <h3>จุดเสี่ยง (Blackspot)</h3>
+                <p class="muted" id="risk-sub">—</p>
+              </div>
+              <div class="risk-controls">
+                <label class="field">
+                  <span>ชุดข้อมูล</span>
+                  <select id="risk-cluster"></select>
+                </label>
+                <label class="field">
+                  <span>พื้นที่</span>
+                  <select id="risk-scope"></select>
+                </label>
+                <label class="field">
+                  <span>เรียงตาม</span>
+                  <select id="risk-order"></select>
+                </label>
+              </div>
+            </div>
+
+            <div class="risk-table-wrap">
+              <table class="risk-table">
+                <thead>
+                  <tr>
+                    <th class="risk-rank">#</th>
+                    <th>จุดเสี่ยง</th>
+                    <th>อำเภอ / เขต</th>
+                    <th class="num">อุบัติเหตุ</th>
+                    <th class="num">เสียชีวิต</th>
+                    <th class="num">บาดเจ็บ</th>
+                    <th>ระดับ*</th>
+                  </tr>
+                </thead>
+                <tbody id="risk-body"></tbody>
+              </table>
+            </div>
+
+            <div class="risk-foot">
+              <span class="muted" id="risk-count"></span>
+              <button type="button" class="btn btn-outline btn-sm" id="risk-map-toggle">ซ่อนจุดเสี่ยงบนแผนที่</button>
+            </div>
+            <p class="map-hint">* ระดับคำนวณจากอันดับในรายการที่กรองอยู่ (10 อันดับแรก = มาก, 50 อันดับแรก = ปานกลาง) ไม่ใช่ค่าที่ API ส่งมา</p>
           </div>
 
           <div class="card events-card" id="events-card" hidden>
@@ -312,6 +360,6 @@
     </dialog>
 
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script src="app.js?v=2"></script>
+    <script src="app.js?v=5"></script>
   </body>
 </html>

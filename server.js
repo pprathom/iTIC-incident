@@ -297,24 +297,6 @@ function handleSession(req, res) {
   });
 }
 
-async function handleClusters(req, res) {
-  const found = getSession(req);
-  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
-
-  const url = new URL(req.url, 'http://localhost');
-  const query = url.searchParams.get('id');
-  const result = await upstream(`/cluster/get_list${query ? `?id=${encodeURIComponent(query)}` : ''}`, {
-    token: found.session.token,
-  });
-
-  if (!result.ok || !result.json || result.json.success === false) {
-    const err = upstreamError(result, 'ไม่สามารถดึงรายการ cluster ได้');
-    if (err.status === 401) destroySession(req);
-    return sendJSON(res, err.status, { error: err.message });
-  }
-  sendJSON(res, 200, { data: result.json.data || [] });
-}
-
 async function handleAccidents(req, res) {
   const found = getSession(req);
   if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
@@ -375,6 +357,265 @@ async function handleAccidents(req, res) {
     limit,
     data: result.json.data || [],
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Blackspots, clusters, district stats                               */
+/* ------------------------------------------------------------------ */
+
+const ORDER_TYPE_LABELS = {
+  1: 'จำนวนอุบัติเหตุทั้งหมด',
+  2: 'จำนวนอุบัติเหตุรุนแรง',
+  3: 'จำนวนผู้เสียชีวิต',
+  4: 'จำนวนผู้บาดเจ็บ',
+  6: 'คะแนนความรุนแรง',
+};
+
+const DISTRICT_ID_RE = /^\d{2}(\d{2}(\d{2})?)?$/;
+
+/** GET /api/clusters — ชุดการวิเคราะห์จุดเสี่ยง (cluster) */
+async function handleClusters(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  const cached = cacheGet('clusters');
+  if (cached) return sendJSON(res, 200, cached);
+
+  const result = await upstream('/cluster/get_list', { token: found.session.token });
+  if (!result.ok || !result.json || result.json.success === false) {
+    const err = upstreamError(result, 'ไม่สามารถดึงรายการ cluster ได้');
+    if (err.status === 401) destroySession(req);
+    return sendJSON(res, err.status, { error: err.message });
+  }
+
+  const list = Array.isArray(result.json.data) ? result.json.data : [];
+  const defaultCluster = list.find((cluster) => cluster.is_default) || list[0] || null;
+
+  const payload = {
+    defaultId: defaultCluster ? defaultCluster.id : null,
+    orderTypes: Object.entries(ORDER_TYPE_LABELS).map(([id, label]) => ({ id: Number(id), label })),
+    data: list.map((cluster) => ({
+      id: cluster.id,
+      name: cluster.name,
+      updated: cluster.updated || '',
+      startDate: cluster.start_date || '',
+      endDate: cluster.end_date || '',
+      isDefault: Boolean(cluster.is_default),
+      defaultOrderId: Number(cluster.default_order_id) || 1,
+      max: cluster.max || null,
+    })),
+  };
+
+  cacheSet('clusters', payload);
+  sendJSON(res, 200, payload);
+}
+
+/** GET /api/blackspots?cluster_id&district_id&order_type_id&limit&offset&all */
+async function handleBlackspots(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  const url = new URL(req.url, 'http://localhost');
+  const clusterId = url.searchParams.get('cluster_id');
+  const districtId = String(url.searchParams.get('district_id') || '').trim();
+  const orderTypeId = String(url.searchParams.get('order_type_id') || '').trim();
+  const fetchAll = url.searchParams.get('all') === '1';
+
+  if (clusterId !== null && !/^\d+$/.test(clusterId)) {
+    return sendJSON(res, 400, { error: 'cluster_id ไม่ถูกต้อง' });
+  }
+  if (districtId && !DISTRICT_ID_RE.test(districtId)) {
+    return sendJSON(res, 400, { error: 'district_id ต้องเป็น 2 (จังหวัด), 4 (อำเภอ) หรือ 6 (ตำบล) หลัก' });
+  }
+  if (orderTypeId && !ORDER_TYPE_LABELS[orderTypeId]) {
+    return sendJSON(res, 400, { error: 'order_type_id ไม่ถูกต้อง (1, 2, 3, 4 หรือ 6)' });
+  }
+
+  const limit = Math.min(Math.max(num(url.searchParams.get('limit'), 200), 1), 2000);
+  const startOffset = Math.max(num(url.searchParams.get('offset'), 0), 0);
+  const maxRows = 5000;
+
+  const key = `blackspots:${clusterId || 'd'}:${districtId || '-'}:${orderTypeId || '-'}:${fetchAll ? 'all' : startOffset + ':' + limit}`;
+  const cached = cacheGet(key);
+  if (cached) return sendJSON(res, 200, cached);
+
+  const buildQuery = (offset, size) => {
+    const params = new URLSearchParams();
+    if (clusterId) params.set('id', clusterId);
+    if (districtId) params.set('district_id', districtId);
+    if (orderTypeId) params.set('order_type_id', orderTypeId);
+    params.set('limit', String(size));
+    if (offset) params.set('offset', String(offset));
+    return `/blackspot/get_list?${params.toString()}`;
+  };
+
+  const rows = [];
+  let offset = startOffset;
+  let truncated = false;
+
+  try {
+    do {
+      const size = fetchAll ? Math.min(2000, maxRows - rows.length) : limit;
+      if (size <= 0) break;
+
+      const result = await upstream(buildQuery(offset, size), { token: found.session.token });
+      if (!result.ok || !result.json || result.json.success === false) {
+        const err = upstreamError(result, 'ไม่สามารถดึงรายการจุดเสี่ยงได้');
+        if (err.status === 401) destroySession(req);
+        return sendJSON(res, err.status, { error: err.message });
+      }
+
+      const batch = Array.isArray(result.json.data) ? result.json.data : [];
+      rows.push(...batch);
+      offset += batch.length;
+
+      if (!fetchAll) break;
+      if (batch.length < size) break;
+      if (rows.length >= maxRows) {
+        truncated = true;
+        break;
+      }
+    } while (true);
+  } catch (error) {
+    const status = error.name === 'TimeoutError' ? 504 : 502;
+    return sendJSON(res, status, { error: `ดึงรายการจุดเสี่ยงไม่สำเร็จ (${error.message})` });
+  }
+
+  const payload = {
+    clusterId: clusterId ? Number(clusterId) : null,
+    districtId,
+    orderTypeId: orderTypeId ? Number(orderTypeId) : null,
+    orderTypeLabel: orderTypeId ? ORDER_TYPE_LABELS[orderTypeId] : '',
+    total: rows.length,
+    truncated,
+    data: rows,
+  };
+
+  cacheSet(key, payload);
+  sendJSON(res, 200, payload);
+}
+
+/** GET /api/district-stats?lat&lon หรือ ?district_id&cluster_id */
+async function handleDistrictStats(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  const url = new URL(req.url, 'http://localhost');
+  const rawLat = url.searchParams.get('lat');
+  const rawLon = url.searchParams.get('lon');
+  const districtId = String(url.searchParams.get('district_id') || '').trim();
+  const clusterId = url.searchParams.get('cluster_id');
+
+  const params = new URLSearchParams();
+  if (rawLat !== null && rawLon !== null) {
+    const lat = Number(rawLat);
+    const lon = Number(rawLon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return sendJSON(res, 400, { error: 'พิกัดไม่ถูกต้อง' });
+    }
+    params.set('lat', String(lat));
+    params.set('lon', String(lon));
+  } else if (/^\d{4}$/.test(districtId)) {
+    params.set('district_id', districtId);
+  } else {
+    return sendJSON(res, 400, { error: 'ต้องระบุ lat/lon หรือ district_id (4 หลัก)' });
+  }
+  if (clusterId && /^\d+$/.test(clusterId)) params.set('id', clusterId);
+
+  const key = `district-stats:${params.toString()}`;
+  const cached = cacheGet(key);
+  if (cached) return sendJSON(res, 200, cached);
+
+  const result = await upstream(`/get_by_district?${params.toString()}`, { token: found.session.token });
+  if (!result.ok || !result.json || result.json.success === false) {
+    const err = upstreamError(result, 'ไม่สามารถดึงสถิติอำเภอได้');
+    if (err.status === 401) destroySession(req);
+    return sendJSON(res, err.status, { error: err.message });
+  }
+
+  const data = result.json.data || null;
+  const payload = {
+    district: data
+      ? {
+          districtId: data.district_id,
+          provinceId: data.province_id,
+          districtName: data.district_name || '',
+          provinceName: data.province_name || '',
+          clusterId: data.cluster_id,
+          totalAccident: data.total_accident ?? 0,
+          totalDeath: data.total_death ?? 0,
+          totalInjured: data.total_injured ?? 0,
+          totalAccidentWithDeath: data.total_accident_with_death ?? 0,
+          totalAccidentWithInjured: data.total_accident_with_injured ?? 0,
+          rankInCluster: data.rank_in_cluster ?? null,
+          levelInCluster: data.severity_level_in_cluster || '',
+          rankInProvince: data.rank_in_province ?? null,
+          levelInProvince: data.severity_level_in_province || '',
+          orderTypeId: data.order_type_id ?? null,
+          orderTypeName: data.order_type_name || '',
+        }
+      : null,
+  };
+
+  cacheSet(key, payload);
+  sendJSON(res, 200, payload);
+}
+
+/** GET /api/area-summary?lat&lon&radius&start_date&end_date — สรุปในรัศมี (RAIS) */
+async function handleAreaSummary(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  const url = new URL(req.url, 'http://localhost');
+  const lat = Number(url.searchParams.get('lat'));
+  const lon = Number(url.searchParams.get('lon'));
+  const radius = Number(url.searchParams.get('radius'));
+  const startDate = String(url.searchParams.get('start_date') || '');
+  const endDate = String(url.searchParams.get('end_date') || '');
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    return sendJSON(res, 400, { error: 'พิกัดไม่ถูกต้อง' });
+  }
+  if (!Number.isFinite(radius) || radius <= 0 || radius > 50000) {
+    return sendJSON(res, 400, { error: 'รัศมีต้องอยู่ระหว่าง 1 ถึง 50,000 เมตร' });
+  }
+  if (!DATE_RE.test(startDate) || !DATE_RE.test(endDate) || endDate < startDate) {
+    return sendJSON(res, 400, { error: 'ช่วงวันที่ไม่ถูกต้อง' });
+  }
+
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lon),
+    radius: String(Math.round(radius)),
+    start_date: startDate,
+    end_date: endDate,
+  });
+
+  const key = `area-summary:${params.toString()}`;
+  const cached = cacheGet(key);
+  if (cached) return sendJSON(res, 200, cached);
+
+  const result = await upstream(`/get_summary_by_area?${params.toString()}`, { token: found.session.token });
+  if (!result.ok || !result.json || result.json.success === false) {
+    const err = upstreamError(result, 'ไม่สามารถดึงสรุปอุบัติเหตุในพื้นที่ได้');
+    if (err.status === 401) destroySession(req);
+    return sendJSON(res, err.status, { error: err.message });
+  }
+
+  const data = result.json.data || {};
+  const payload = {
+    totalAccident: data.total_accident ?? 0,
+    totalDeath: data.total_death ?? 0,
+    totalInjured: data.total_injured ?? 0,
+    totalAccidentWithDeath: data.total_accident_with_death ?? 0,
+    totalAccidentWithInjured: data.total_accident_with_injured ?? 0,
+    startDate,
+    endDate,
+    radius: Math.round(radius),
+  };
+
+  cacheSet(key, payload);
+  sendJSON(res, 200, payload);
 }
 
 /* ------------------------------------------------------------------ */
@@ -533,11 +774,16 @@ async function handleArea(req, res) {
       : null,
     districtStats: district
       ? {
+          districtId: district.district_id,
           districtName: district.district_name,
           provinceName: district.province_name,
           totalAccident: district.total_accident,
           totalDeath: district.total_death,
           totalInjured: district.total_injured,
+          rankInCluster: district.rank_in_cluster ?? null,
+          levelInCluster: district.severity_level_in_cluster || '',
+          rankInProvince: district.rank_in_province ?? null,
+          levelInProvince: district.severity_level_in_province || '',
         }
       : null,
   };
@@ -708,6 +954,9 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/logout' && req.method === 'POST') return await handleLogout(req, res);
     if (pathname === '/api/session' && req.method === 'GET') return handleSession(req, res);
     if (pathname === '/api/clusters' && req.method === 'GET') return await handleClusters(req, res);
+    if (pathname === '/api/blackspots' && req.method === 'GET') return await handleBlackspots(req, res);
+    if (pathname === '/api/district-stats' && req.method === 'GET') return await handleDistrictStats(req, res);
+    if (pathname === '/api/area-summary' && req.method === 'GET') return await handleAreaSummary(req, res);
     if (pathname === '/api/provinces' && req.method === 'GET') {
       return sendJSON(res, 200, { data: loadProvinces() });
     }
