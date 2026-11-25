@@ -18,7 +18,7 @@
       })();
     </script>
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="styles.css?v=5" />
+    <link rel="stylesheet" href="styles.css?v=8" />
   </head>
   <body>
     <header class="topbar">
@@ -43,7 +43,7 @@
       </div>
     </header>
 
-    <main class="container">
+    <main class="container" id="main">
       <!-- ============================ LOGIN ============================ -->
       <section id="login-view" class="login-wrap">
         <form id="login-form" class="card login-card" autocomplete="on">
@@ -69,142 +69,291 @@
       </section>
 
       <!-- ============================= APP ============================= -->
-      <section id="app-view" hidden>
-        <form id="filter-form" class="card filter-card" novalidate>
-          <div class="card-head">
-            <h2>เงื่อนไขการค้นหา</h2>
-            <div class="quick-ranges date-chips">
-              <button type="button" class="chip" data-range="7">7 วันล่าสุด</button>
-              <button type="button" class="chip" data-range="30">30 วันล่าสุด</button>
-              <button type="button" class="chip" data-range="90">90 วันล่าสุด</button>
-              <button type="button" class="chip" data-range="year">ทั้งปีนี้</button>
-            </div>
+      <section id="app-view" class="workspace" hidden>
+        <aside class="panel" id="panel" aria-label="แผงค้นหาและผลลัพธ์">
+          <div class="tabs" role="tablist" aria-label="หมวดข้อมูล">
+            <button type="button" class="tab is-active" role="tab" id="tab-filters" aria-selected="true" aria-controls="pane-filters" data-tab="filters">ตัวกรอง</button>
+            <button type="button" class="tab" role="tab" id="tab-results" aria-selected="false" aria-controls="pane-results" data-tab="results" tabindex="-1">ผลลัพธ์<span class="tab-count" data-count="results" hidden></span></button>
+            <button type="button" class="tab" role="tab" id="tab-risk" aria-selected="false" aria-controls="pane-risk" data-tab="risk" tabindex="-1">จุดเสี่ยง<span class="tab-count" data-count="risk" hidden></span></button>
+            <button type="button" class="tab" role="tab" id="tab-events" aria-selected="false" aria-controls="pane-events" data-tab="events" tabindex="-1">เหตุการณ์สด<span class="tab-count" data-count="events" hidden></span></button>
           </div>
 
-          <div class="grid">
-            <label class="field">
-              <span>แหล่งข้อมูล</span>
-              <select id="source_id" name="source_id">
-                <option value="0">ทั้งหมด</option>
-                <option value="3" selected>RAIS</option>
-                <option value="1">RVP</option>
-                <option value="2">iTIC</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>ระดับความรุนแรง</span>
-              <select id="severity_id" name="severity_id">
-                <option value="1" selected>ทั้งหมด</option>
-                <option value="2">มีผู้บาดเจ็บ</option>
-                <option value="3">มีผู้เสียชีวิต</option>
-              </select>
-            </label>
-
-            <label class="field">
-              <span>จังหวัด</span>
-              <select id="province" required></select>
-            </label>
-
-            <label class="field">
-              <span>วันที่เริ่มต้น</span>
-              <input id="start_date" type="date" min="2022-01-01" required />
-            </label>
-
-            <label class="field">
-              <span>วันที่สิ้นสุด</span>
-              <input id="end_date" type="date" min="2022-01-01" required />
-            </label>
-
-            <label class="field">
-              <span>คำค้น (เช่น ชื่อถนน / สถานที่)</span>
-              <input id="keyword" type="text" placeholder="ไม่บังคับ" autocomplete="off" />
-            </label>
-          </div>
-
-          <details class="advanced">
-            <summary>ตัวเลือกขั้นสูง (จำกัดพื้นที่ / จำนวนรายการ)</summary>
-            <div class="grid advanced-grid">
-              <label class="field checkbox-field">
-                <input id="use-area" type="checkbox" />
-                <span>จำกัดพื้นที่รอบจุด (point + buffer)</span>
-              </label>
-
-              <label class="field">
-                <span>ค้นหาสถานที่ (ชื่อแยก / ถนน / สถานที่)</span>
-                <div class="input-row">
-                  <input id="place-query" type="text" placeholder="เช่น แยกพญาไท" autocomplete="off" />
-                  <button type="button" class="btn btn-outline" id="place-search-btn">ค้นหา</button>
+          <!-- ---------------- ตัวกรอง ---------------- -->
+          <div class="tab-pane is-active" role="tabpanel" id="pane-filters" aria-labelledby="tab-filters" data-pane="filters">
+            <form id="filter-form" class="filter-form" novalidate>
+              <fieldset class="group">
+                <legend>ช่วงเวลา</legend>
+                <div class="quick-ranges date-chips">
+                  <button type="button" class="chip" data-range="7">7 วันล่าสุด</button>
+                  <button type="button" class="chip" data-range="30">30 วันล่าสุด</button>
+                  <button type="button" class="chip" data-range="90">90 วันล่าสุด</button>
+                  <button type="button" class="chip" data-range="year">ทั้งปีนี้</button>
                 </div>
-              </label>
+                <div class="grid-2">
+                  <label class="field">
+                    <span>วันที่เริ่มต้น</span>
+                    <input id="start_date" type="date" min="2022-01-01" required />
+                  </label>
+                  <label class="field">
+                    <span>วันที่สิ้นสุด</span>
+                    <input id="end_date" type="date" min="2022-01-01" required />
+                  </label>
+                </div>
+              </fieldset>
 
-              <label class="field" id="place-result-field" hidden>
-                <span>เลือกสถานที่ที่พบ</span>
-                <select id="place-result"></select>
-              </label>
+              <fieldset class="group">
+                <legend>ประเภทข้อมูล</legend>
+                <div class="grid-2">
+                  <label class="field">
+                    <span>แหล่งข้อมูล</span>
+                    <select id="source_id" name="source_id">
+                      <option value="0">ทั้งหมด (ช้ากว่า ~3 เท่า)</option>
+                      <option value="3" selected>RAIS</option>
+                      <option value="1">RVP</option>
+                      <option value="2">iTIC</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>ความรุนแรง</span>
+                    <select id="severity_id" name="severity_id">
+                      <option value="1" selected>ทั้งหมด</option>
+                      <option value="2">มีผู้บาดเจ็บ</option>
+                      <option value="3">มีผู้เสียชีวิต</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="field">
+                  <span>คำค้น (ชื่อถนน / สถานที่)</span>
+                  <input id="keyword" type="text" placeholder="ไม่บังคับ" autocomplete="off" />
+                </label>
+              </fieldset>
 
-              <label class="field">
-                <span>ละติจูด (lat)</span>
-                <input id="lat" type="number" step="any" placeholder="13.7563" disabled />
-              </label>
+              <fieldset class="group">
+                <legend>พื้นที่</legend>
+                <label class="field">
+                  <span>จังหวัด</span>
+                  <select id="province" required></select>
+                </label>
 
-              <label class="field">
-                <span>ลองจิจูด (lon)</span>
-                <input id="lon" type="number" step="any" placeholder="100.5018" disabled />
-              </label>
+                <label class="field checkbox-field">
+                  <input id="use-area" type="checkbox" />
+                  <span>จำกัดพื้นที่รอบจุด (เลือกจุดได้จากโหมด “เลือกบริเวณ” บนแผนที่)</span>
+                </label>
 
-              <label class="field">
-                <span>รัศมี (เมตร)</span>
-                <input id="buffer" type="number" min="1" step="any" value="1000" disabled />
-              </label>
+                <div class="area-fields">
+                  <label class="field">
+                    <span>ค้นหาสถานที่ (ชื่อแยก / ถนน)</span>
+                    <div class="input-row">
+                      <input id="place-query" type="text" placeholder="เช่น แยกพญาไท" autocomplete="off" />
+                      <button type="button" class="btn btn-outline" id="place-search-btn">ค้นหา</button>
+                    </div>
+                  </label>
 
-              <label class="field">
-                <span>จำนวนต่อครั้ง (limit)</span>
-                <select id="limit">
-                  <option value="500">500</option>
-                  <option value="1000">1,000</option>
-                  <option value="2000" selected>2,000</option>
-                </select>
-              </label>
+                  <label class="field" id="place-result-field" hidden>
+                    <span>เลือกสถานที่ที่พบ</span>
+                    <select id="place-result"></select>
+                  </label>
 
-              <label class="field checkbox-field">
-                <input id="fetch-all" type="checkbox" checked />
-                <span>ดึงข้อมูลทั้งหมด (แบ่งหน้าอัตโนมัติ)</span>
-              </label>
-            </div>
-          </details>
+                  <div class="grid-3">
+                    <label class="field">
+                      <span>ละติจูด</span>
+                      <input id="lat" type="number" step="any" placeholder="13.7563" disabled />
+                    </label>
+                    <label class="field">
+                      <span>ลองจิจูด</span>
+                      <input id="lon" type="number" step="any" placeholder="100.5018" disabled />
+                    </label>
+                    <label class="field">
+                      <span>รัศมี (ม.)</span>
+                      <input id="buffer" type="number" min="1" step="any" value="1000" disabled />
+                    </label>
+                  </div>
+                </div>
+              </fieldset>
 
-          <div class="actions">
-            <button type="submit" class="btn btn-primary" id="search-btn">ค้นหาข้อมูล</button>
-            <button type="button" class="btn btn-ghost" id="reset-btn">ล้างเงื่อนไข</button>
-            <span id="status-line" class="status-line" role="status"></span>
-          </div>
-        </form>
+              <details class="advanced">
+                <summary>จำนวนข้อมูลที่ดึง</summary>
+                <div class="grid-2 advanced-grid">
+                  <label class="field">
+                    <span>จำนวนต่อครั้ง</span>
+                    <select id="limit">
+                      <option value="500">500</option>
+                      <option value="1000">1,000</option>
+                      <option value="2000" selected>2,000</option>
+                    </select>
+                  </label>
+                  <label class="field checkbox-field">
+                    <input id="fetch-all" type="checkbox" checked />
+                    <span>ดึงทั้งหมดอัตโนมัติ</span>
+                  </label>
+                </div>
+              </details>
 
-        <!-- ------------------------- RESULTS ------------------------- -->
-        <section class="results">
-          <div class="card area-card" id="area-card" hidden>
-            <div class="area-icon">📍</div>
-            <div class="area-body">
-              <h3 id="area-title">—</h3>
-              <p id="area-detail" class="muted"></p>
-              <div id="area-chips" class="area-chips"></div>
-              <div id="area-stats" class="area-stats" hidden></div>
-            </div>
-          </div>
-
-          <div class="card map-card" id="map-card" hidden>
-            <div class="map-head">
-              <div>
-                <h3>แผนที่อุบัติเหตุ</h3>
-                <p class="muted" id="map-sub">—</p>
+              <div class="actions">
+                <button type="submit" class="btn btn-primary" id="search-btn">ค้นหาข้อมูล</button>
+                <button type="button" class="btn btn-ghost" id="reset-btn">ล้างเงื่อนไข</button>
+                <p id="status-line" class="status-line" role="status"></p>
               </div>
-              <div class="map-actions">
-                <button type="button" class="btn btn-outline btn-sm" id="map-fit">ดูผลลัพธ์ทั้งหมด</button>
+            </form>
+          </div>
+
+          <!-- ---------------- ผลลัพธ์ ---------------- -->
+          <div class="tab-pane" role="tabpanel" id="pane-results" aria-labelledby="tab-results" data-pane="results" hidden>
+            <div class="stats" id="stats" hidden>
+              <div class="stat">
+                <span class="stat-label">รายการอุบัติเหตุ<span role="button" tabindex="0" class="info-tip" data-tip-title="รายการอุบัติเหตุ" data-tip="จำนวนอุบัติเหตุที่ดึงมาตามเงื่อนไขในแท็บตัวกรอง หลังกรองด้วยประเภทยานพาหนะหรือช่องกรองในตารางแล้ว&#10;นับจากข้อมูลที่ดึงมาแสดงจริง ถ้าถึงขีดจำกัด 100,000 รายการ จะน้อยกว่าจำนวนทั้งหมดที่มี" aria-label="คำอธิบาย: รายการอุบัติเหตุ">i</span></span>
+                <strong id="stat-total">0</strong>
+              </div>
+              <div class="stat">
+                <span class="stat-label">ผู้เสียชีวิต<span role="button" tabindex="0" class="info-tip" data-tip-title="ผู้เสียชีวิต" data-tip="ผลรวมจำนวนผู้เสียชีวิตของอุบัติเหตุทุกรายการในผลลัพธ์ (อุบัติเหตุหนึ่งรายการอาจมีผู้เสียชีวิตมากกว่า 1 คน)" aria-label="คำอธิบาย: ผู้เสียชีวิต">i</span></span>
+                <strong id="stat-death">0</strong>
+              </div>
+              <div class="stat">
+                <span class="stat-label">ผู้บาดเจ็บ<span role="button" tabindex="0" class="info-tip" data-tip-title="ผู้บาดเจ็บ" data-tip="ผลรวมจำนวนผู้บาดเจ็บของอุบัติเหตุทุกรายการในผลลัพธ์" aria-label="คำอธิบาย: ผู้บาดเจ็บ">i</span></span>
+                <strong id="stat-injured">0</strong>
+              </div>
+              <div class="stat stat-wide">
+                <span class="stat-label">ช่วงวันที่<span role="button" tabindex="0" class="info-tip" data-tip-title="ช่วงวันที่" data-tip="วันแรกและวันสุดท้ายที่มีอุบัติเหตุอยู่ในผลลัพธ์&#10;อาจแคบกว่าช่วงวันที่ที่เลือกค้นหา ถ้าไม่มีอุบัติเหตุในวันต้นหรือวันท้ายช่วง" aria-label="คำอธิบาย: ช่วงวันที่">i</span></span>
+                <strong id="stat-range">—</strong>
               </div>
             </div>
+
+            <button type="button" class="btn btn-outline btn-block" id="open-table" hidden>ดูตารางรายการ</button>
+
+            <div class="card area-card" id="area-card" hidden>
+              <div class="area-icon">📍</div>
+              <div class="area-body">
+                <h3 id="area-title">—</h3>
+                <p id="area-detail" class="muted"></p>
+                <div id="area-chips" class="area-chips"></div>
+                <div id="area-stats" class="area-stats" hidden></div>
+              </div>
+            </div>
+
+            <div class="card empty" id="empty-state">
+              <p>ยังไม่มีข้อมูล<br />ตั้งเงื่อนไขในแท็บ <strong>ตัวกรอง</strong> แล้วกด <strong>ค้นหาข้อมูล</strong><br />หรือสลับเป็นโหมด <strong>เลือกบริเวณ</strong> แล้วคลิกบนแผนที่</p>
+            </div>
+          </div>
+
+          <!-- ---------------- จุดเสี่ยง ---------------- -->
+          <div class="tab-pane" role="tabpanel" id="pane-risk" aria-labelledby="tab-risk" data-pane="risk" hidden>
+            <div class="card risk-card" id="risk-card" hidden>
+              <div class="risk-head">
+                <div>
+                  <h3>จุดเสี่ยง (Blackspot)</h3>
+                  <p class="muted" id="risk-sub">—</p>
+                </div>
+              </div>
+              <div class="risk-controls">
+                <label class="field">
+                  <span>ชุดข้อมูล<span role="button" tabindex="0" class="info-tip" data-tip-title="ชุดข้อมูล (cluster)" data-tip="ชุดวิเคราะห์จุดเสี่ยงของ iTIC แต่ละชุดครอบคลุมช่วงเวลาต่างกัน เช่น ปี 2567, ปี 2568 หรือช่วงสงกรานต์&#10;แอปเลือกชุดที่ทับซ้อนกับช่วงวันที่ค้นหามากที่สุดให้อัตโนมัติ" aria-label="คำอธิบาย: ชุดข้อมูล (cluster)">i</span></span>
+                  <select id="risk-cluster"></select>
+                </label>
+                <label class="field">
+                  <span>พื้นที่<span role="button" tabindex="0" class="info-tip" data-tip-title="พื้นที่" data-tip="ขอบเขตของรายการจุดเสี่ยง: ทั้งจังหวัดที่เลือก หรือเฉพาะเขต/อำเภอของจุดที่ค้นหา" aria-label="คำอธิบาย: พื้นที่">i</span></span>
+                  <select id="risk-scope"></select>
+                </label>
+                <label class="field">
+                  <span>เรียงตาม<span role="button" tabindex="0" class="info-tip" data-tip-title="เรียงตาม" data-tip="เกณฑ์จัดอันดับจุดเสี่ยง เช่น จำนวนอุบัติเหตุทั้งหมด จำนวนผู้เสียชีวิต หรือคะแนนความรุนแรง เกณฑ์ที่ใช้ได้ขึ้นกับชุดข้อมูลที่เลือก" aria-label="คำอธิบาย: เรียงตาม">i</span></span>
+                  <select id="risk-order"></select>
+                </label>
+              </div>
+
+              <div class="risk-table-wrap">
+                <table class="risk-table">
+                  <thead>
+                    <tr>
+                      <th class="risk-rank">#<span role="button" tabindex="0" class="info-tip" data-tip-title="อันดับ" data-tip="อันดับของจุดเสี่ยงตามเกณฑ์ที่เลือกในช่อง เรียงตาม ด้านบน อันดับ 1 = มากที่สุด" aria-label="คำอธิบาย: อันดับ">i</span></th>
+                      <th>จุดเสี่ยง</th>
+                      <th>อำเภอ / เขต</th>
+                      <th class="num">อุบัติเหตุ<span role="button" tabindex="0" class="info-tip" data-tip-title="อุบัติเหตุ" data-tip="จำนวนอุบัติเหตุรวมที่จุดเสี่ยงนี้ ตามชุดข้อมูลที่เลือกในช่อง ชุดข้อมูล ด้านบน ไม่เปลี่ยนตามช่วงวันที่ในแท็บตัวกรอง" aria-label="คำอธิบาย: อุบัติเหตุ">i</span></th>
+                      <th class="num">เสียชีวิต<span role="button" tabindex="0" class="info-tip" data-tip-title="เสียชีวิต" data-tip="จำนวนผู้เสียชีวิตรวมที่จุดเสี่ยงนี้ ในชุดข้อมูลเดียวกัน" aria-label="คำอธิบาย: เสียชีวิต">i</span></th>
+                      <th class="num">บาดเจ็บ<span role="button" tabindex="0" class="info-tip" data-tip-title="บาดเจ็บ" data-tip="จำนวนผู้บาดเจ็บรวมที่จุดเสี่ยงนี้ ในชุดข้อมูลเดียวกัน" aria-label="คำอธิบาย: บาดเจ็บ">i</span></th>
+                      <th>ระดับ*<span role="button" tabindex="0" class="info-tip" data-tip-title="ระดับ" data-tip="แอปคำนวณเองจากอันดับในรายการที่กรองอยู่: 10 อันดับแรก = มาก, 50 อันดับแรก = ปานกลาง, ที่เหลือ = น้อย ไม่ใช่ค่าที่ API ส่งมา" aria-label="คำอธิบาย: ระดับ">i</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="risk-body"></tbody>
+                </table>
+              </div>
+
+              <div class="risk-foot">
+                <span class="muted" id="risk-count"></span>
+                <button type="button" class="btn btn-outline btn-sm" id="risk-map-toggle">ซ่อนจุดเสี่ยงบนแผนที่</button>
+              </div>
+              <p class="map-hint">* ระดับคำนวณจากอันดับในรายการที่กรองอยู่ (10 อันดับแรก = มาก, 50 อันดับแรก = ปานกลาง) ไม่ใช่ค่าที่ API ส่งมา</p>
+            </div>
+            <p class="pane-empty">จุดเสี่ยงจะแสดงหลังค้นหาข้อมูลที่มีผลลัพธ์</p>
+          </div>
+
+          <!-- ---------------- เหตุการณ์สด ---------------- -->
+          <div class="tab-pane" role="tabpanel" id="pane-events" aria-labelledby="tab-events" data-pane="events" hidden>
+            <div class="card events-card" id="events-card" hidden>
+              <div class="events-head">
+                <div>
+                  <h3>เหตุการณ์ปัจจุบัน</h3>
+                  <p class="muted" id="events-sub"></p>
+                </div>
+              </div>
+              <ul class="events-list" id="events-list"></ul>
+              <p class="events-foot muted">ข้อมูลจาก Longdo Map — เป็นเหตุการณ์สด ไม่ใช่ข้อมูลสถิติอุบัติเหตุ</p>
+            </div>
+            <p class="pane-empty">ไม่พบเหตุการณ์สดใกล้พื้นที่ที่ค้นหา หรือยังไม่ได้ค้นหา</p>
+          </div>
+        </aside>
+
+        <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" aria-label="ปรับความกว้างแผงด้านซ้าย" aria-valuemin="300" tabindex="0" title="ลากเพื่อปรับความกว้างแผง (ดับเบิลคลิกเพื่อคืนค่า)"></div>
+
+        <section class="stage" id="stage">
+          <div class="stage-bar">
+            <button type="button" class="btn btn-ghost btn-sm" id="panel-toggle" aria-expanded="true" aria-controls="panel">ซ่อนแผง</button>
+
+            <div class="mode-switch" role="group" aria-label="โหมดการคลิกบนแผนที่">
+              <button type="button" class="mode-btn is-active" id="mode-inspect" aria-pressed="true" title="คลิกจุดอุบัติเหตุ เหตุการณ์ หรือจุดเสี่ยง เพื่อดูรายละเอียด">ดูข้อมูลที่จุด</button>
+              <button type="button" class="mode-btn" id="mode-area" aria-pressed="false" title="คลิกบนแผนที่เพื่อเลือกบริเวณ แล้วค้นหารอบจุดนั้น">เลือกบริเวณ</button>
+            </div>
+
+            <div class="map-search" id="map-search-box">
+              <input id="map-search" type="search" placeholder="ค้นหาสถานที่บนแผนที่ เช่น แยกสุทธิสาร" autocomplete="off" aria-label="ค้นหาสถานที่บนแผนที่" />
+              <ul class="map-search-results" id="map-search-results" hidden></ul>
+            </div>
+
+            <p class="stage-summary muted" id="map-sub">—</p>
+
+            <button type="button" class="btn btn-outline btn-sm" id="fullscreen-toggle" aria-pressed="false">เต็มจอ</button>
+
+            <div class="export-menu" id="export-menu">
+              <button type="button" class="btn btn-primary btn-sm" id="export-toggle" aria-haspopup="true" aria-expanded="false">ส่งออก ▾</button>
+              <div class="export-pop" id="export-pop" hidden>
+                <button type="button" class="export-item" id="export-btn">
+                  <strong>CSV อุบัติเหตุ</strong>
+                  <span>1 แถวต่อ 1 อุบัติเหตุ</span>
+                </button>
+                <button type="button" class="export-item" id="export-detail-btn">
+                  <strong>CSV ผู้ประสบเหตุ</strong>
+                  <span>1 แถวต่อ 1 ผู้ประสบเหตุ แยกตามยานพาหนะ</span>
+                </button>
+                <button type="button" class="export-item" id="events-export">
+                  <strong>CSV เหตุการณ์สด</strong>
+                  <span>จาก Longdo Map ตามพื้นที่ที่ค้นหา</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="map-wrap" id="map-card">
             <div id="map" class="map-canvas"></div>
-            <div class="map-foot">
+            <p class="mode-hint" id="mode-hint" hidden>โหมดเลือกบริเวณ — คลิกบนแผนที่เพื่อค้นหาอุบัติเหตุรอบจุดนั้น (ปรับรัศมีที่แท็บตัวกรอง)</p>
+            <p class="map-status" id="map-status" role="status" hidden></p>
+
+            <div class="layer-box" aria-label="ชั้นข้อมูลบนแผนที่">
+              <label class="layer-item"><input type="checkbox" id="layer-accidents" checked /><i class="legend-dot dot-injured"></i>อุบัติเหตุ</label>
+              <label class="layer-item"><input type="checkbox" id="layer-risks" checked /><i class="legend-dot dot-risk"></i>จุดเสี่ยง</label>
+              <label class="layer-item"><input type="checkbox" id="layer-events" checked /><i class="legend-dot dot-event"></i>เหตุการณ์สด</label>
+              <button type="button" class="btn btn-outline btn-sm" id="map-fit">ดูผลลัพธ์ทั้งหมด</button>
+            </div>
+
+            <details class="legend-box">
+              <summary>สัญลักษณ์</summary>
               <div class="map-legend">
                 <span class="legend-item"><i class="legend-dot dot-death"></i>เสียชีวิต</span>
                 <span class="legend-item"><i class="legend-dot dot-injured"></i>บาดเจ็บ</span>
@@ -213,90 +362,22 @@
                 <span class="legend-item"><i class="legend-dot dot-risk"></i>จุดเสี่ยง (แหวน)</span>
                 <span class="legend-item"><i class="legend-dot dot-pin"></i>จุดค้นหา</span>
               </div>
-              <span class="map-hint">ลากหมุด หรือคลิกบนแผนที่เพื่อย้ายจุดค้นหา</span>
-            </div>
+              <p class="map-hint">โหมด “ดูข้อมูลที่จุด” คลิกจุดเพื่อดูรายละเอียด · โหมด “เลือกบริเวณ” คลิกแผนที่หรือลากหมุดเพื่อค้นหารอบจุด</p>
+            </details>
           </div>
 
-          <div class="card risk-card" id="risk-card" hidden>
-            <div class="risk-head">
-              <div>
-                <h3>จุดเสี่ยง (Blackspot)</h3>
-                <p class="muted" id="risk-sub">—</p>
-              </div>
-              <div class="risk-controls">
-                <label class="field">
-                  <span>ชุดข้อมูล</span>
-                  <select id="risk-cluster"></select>
-                </label>
-                <label class="field">
-                  <span>พื้นที่</span>
-                  <select id="risk-scope"></select>
-                </label>
-                <label class="field">
-                  <span>เรียงตาม</span>
-                  <select id="risk-order"></select>
-                </label>
-              </div>
+          <div class="card table-card" id="table-card" data-open="false" hidden>
+            <div class="drawer-grip" id="drawer-grip" role="separator" aria-orientation="horizontal" aria-label="ปรับความสูงตาราง" tabindex="0" title="ลากเพื่อปรับความสูง (ดับเบิลคลิกเพื่อขยายเต็มพื้นที่)"></div>
+            <div class="drawer-head">
+              <button type="button" class="drawer-toggle" id="table-toggle" aria-expanded="false" aria-controls="table-body">
+                <strong>ตารางรายการ</strong>
+                <span class="muted" id="row-count"></span>
+                <span class="drawer-chevron" aria-hidden="true">▴</span>
+              </button>
+              <button type="button" class="btn btn-outline btn-sm drawer-expand" id="table-expand" aria-pressed="false" hidden>ขยายเต็มพื้นที่</button>
             </div>
-
-            <div class="risk-table-wrap">
-              <table class="risk-table">
-                <thead>
-                  <tr>
-                    <th class="risk-rank">#</th>
-                    <th>จุดเสี่ยง</th>
-                    <th>อำเภอ / เขต</th>
-                    <th class="num">อุบัติเหตุ</th>
-                    <th class="num">เสียชีวิต</th>
-                    <th class="num">บาดเจ็บ</th>
-                    <th>ระดับ*</th>
-                  </tr>
-                </thead>
-                <tbody id="risk-body"></tbody>
-              </table>
-            </div>
-
-            <div class="risk-foot">
-              <span class="muted" id="risk-count"></span>
-              <button type="button" class="btn btn-outline btn-sm" id="risk-map-toggle">ซ่อนจุดเสี่ยงบนแผนที่</button>
-            </div>
-            <p class="map-hint">* ระดับคำนวณจากอันดับในรายการที่กรองอยู่ (10 อันดับแรก = มาก, 50 อันดับแรก = ปานกลาง) ไม่ใช่ค่าที่ API ส่งมา</p>
-          </div>
-
-          <div class="card events-card" id="events-card" hidden>
-            <div class="events-head">
-              <div>
-                <h3>เหตุการณ์ปัจจุบัน</h3>
-                <p class="muted" id="events-sub"></p>
-              </div>
-              <button type="button" class="btn btn-outline btn-sm" id="events-export">ส่งออก CSV</button>
-            </div>
-            <ul class="events-list" id="events-list"></ul>
-            <p class="events-foot muted">ข้อมูลจาก Longdo Map — เป็นเหตุการณ์สด ไม่ใช่ข้อมูลสถิติอุบัติเหตุ</p>
-          </div>
-
-          <div class="stats" id="stats" hidden>
-            <div class="stat">
-              <span class="stat-label">รายการอุบัติเหตุ</span>
-              <strong id="stat-total">0</strong>
-            </div>
-            <div class="stat">
-              <span class="stat-label">ผู้เสียชีวิต</span>
-              <strong id="stat-death">0</strong>
-            </div>
-            <div class="stat">
-              <span class="stat-label">ผู้บาดเจ็บ</span>
-              <strong id="stat-injured">0</strong>
-            </div>
-            <div class="stat">
-              <span class="stat-label">ช่วงวันที่</span>
-              <strong id="stat-range">—</strong>
-            </div>
-          </div>
-
-          <div class="card table-card" id="table-card" hidden>
-            <div class="table-toolbar">
-              <div class="toolbar-left">
+            <div class="drawer-body" id="table-body">
+              <div class="table-toolbar">
                 <label class="field inline">
                   <span>ประเภทยานพาหนะ</span>
                   <select id="vehicle-filter">
@@ -308,43 +389,35 @@
                   <input id="row-search" type="search" placeholder="ตำบล / อำเภอ / วันที่" autocomplete="off" />
                 </label>
               </div>
-              <div class="toolbar-right">
-                <button type="button" class="btn btn-outline" id="export-btn">ส่งออก CSV</button>
-                <button type="button" class="btn btn-outline" id="export-detail-btn">CSV รายละเอียดผู้ประสบเหตุ</button>
+
+              <div class="table-wrap">
+                <table id="result-table">
+                  <thead>
+                    <tr>
+                      <th class="sortable" data-sort="datetime">วัน–เวลา</th>
+                      <th>แหล่ง</th>
+                      <th class="num sortable" data-sort="death">เสียชีวิต</th>
+                      <th class="num sortable" data-sort="injured">บาดเจ็บ</th>
+                      <th>ตำบล</th>
+                      <th>อำเภอ</th>
+                      <th>พิกัด (lat, lon)</th>
+                      <th>ยานพาหนะ</th>
+                      <th class="num">ผู้ประสบเหตุ</th>
+                    </tr>
+                  </thead>
+                  <tbody id="result-body"></tbody>
+                </table>
+              </div>
+
+              <div class="table-footer">
+                <span class="muted">คลิกแถวเพื่อดูรายละเอียด</span>
+                <div class="pager">
+                  <button type="button" class="btn btn-ghost btn-sm" id="prev-page">ก่อนหน้า</button>
+                  <span id="page-info" class="muted"></span>
+                  <button type="button" class="btn btn-ghost btn-sm" id="next-page">ถัดไป</button>
+                </div>
               </div>
             </div>
-
-            <div class="table-wrap">
-              <table id="result-table">
-                <thead>
-                  <tr>
-                    <th class="sortable" data-sort="datetime">วัน–เวลา</th>
-                    <th>แหล่ง</th>
-                    <th class="num sortable" data-sort="death">เสียชีวิต</th>
-                    <th class="num sortable" data-sort="injured">บาดเจ็บ</th>
-                    <th>ตำบล</th>
-                    <th>อำเภอ</th>
-                    <th>พิกัด (lat, lon)</th>
-                    <th>ยานพาหนะ</th>
-                    <th class="num">ผู้ประสบเหตุ</th>
-                  </tr>
-                </thead>
-                <tbody id="result-body"></tbody>
-              </table>
-            </div>
-
-            <div class="table-footer">
-              <span id="row-count" class="muted"></span>
-              <div class="pager">
-                <button type="button" class="btn btn-ghost btn-sm" id="prev-page">ก่อนหน้า</button>
-                <span id="page-info" class="muted"></span>
-                <button type="button" class="btn btn-ghost btn-sm" id="next-page">ถัดไป</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="card empty" id="empty-state">
-            <p>ยังไม่มีข้อมูล — กำหนดเงื่อนไขแล้วกด <strong>ค้นหาข้อมูล</strong></p>
           </div>
         </section>
       </section>
@@ -360,6 +433,6 @@
     </dialog>
 
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script src="app.js?v=5"></script>
+    <script src="app.js?v=8"></script>
   </body>
 </html>

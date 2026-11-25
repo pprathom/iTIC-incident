@@ -224,9 +224,23 @@ function addDays(iso, days) {
   return toISODate(date);
 }
 
+let mapStatusTimer = null;
+
 function setStatus(text, kind = '') {
   el.status.textContent = text;
   el.status.className = `status-line${kind ? ` ${kind}` : ''}`;
+
+  // สะท้อนสถานะที่ลอยบนแผนที่ด้วย เพื่อให้เห็นความคืบหน้าแม้เปิดแท็บอื่นอยู่
+  const box = document.getElementById('map-status');
+  if (!box) return;
+  clearTimeout(mapStatusTimer);
+  const show = Boolean(text) && (kind === 'busy' || kind === 'error');
+  box.hidden = !show;
+  if (show) {
+    box.textContent = text;
+    box.className = `map-status${kind ? ` ${kind}` : ''}`;
+    if (kind === 'error') mapStatusTimer = setTimeout(() => { box.hidden = true; }, 6000);
+  }
 }
 
 function vehicleTypes(accident) {
@@ -303,6 +317,7 @@ function showLogin() {
   el.appView.hidden = true;
   el.loginView.hidden = false;
   el.sessionInfo.hidden = true;
+  document.body.classList.remove('is-app');
 }
 
 function showApp(session) {
@@ -311,6 +326,13 @@ function showApp(session) {
   el.appView.hidden = false;
   el.sessionInfo.hidden = false;
   el.sessionUser.textContent = session.username || 'ผู้ใช้';
+  document.body.classList.add('is-app');
+
+  // คีย์แผนที่ส่งมากับข้อมูลเซสชัน (อ่านจาก .env ฝั่งเซิร์ฟเวอร์ ไม่ฝังในไฟล์ static)
+  cartoKey = String((session.map && session.map.cartoKey) || '');
+
+  // แสดงแผนที่ทันทีที่เข้าสู่ระบบ ไม่ต้องรอผลค้นหา
+  if (initMap()) requestAnimationFrame(() => mapState.map.invalidateSize());
   loadClusters().catch((error) => console.warn('clusters:', error.message));
 }
 
@@ -499,6 +521,9 @@ function applyPlace(index) {
   state.place = { name: item.name, displayName: item.displayName, lat: item.lat, lon: item.lon };
   if (!el.useArea.checked) el.useArea.checked = true;
   syncAreaInputs();
+  if (mapState.ready) mapState.map.setView([item.lat, item.lon], 15, { animate: true });
+  if (mapState.pinMarker) mapState.pinMarker.setLatLng([item.lat, item.lon]);
+  if (mapState.circle) mapState.circle.setLatLng([item.lat, item.lon]);
 }
 
 el.placeSearchBtn.addEventListener('click', async () => {
@@ -579,7 +604,7 @@ el.resetBtn.addEventListener('click', () => {
   state.districtName = '';
   el.areaStats.hidden = true;
   el.areaStats.replaceChildren();
-  el.mapCard.hidden = true;
+  el.mapSub.textContent = '—';
   if (mapState.ready) {
     mapState.accidents.clearLayers();
     mapState.events.clearLayers();
@@ -734,6 +759,7 @@ async function runSearch() {
 
     buildVehicleOptions();
     render();
+    if (rows.length > 0) activateTab('results');
 
     if (rows.length === 0) {
       setStatus('ไม่พบข้อมูลตามเงื่อนไขที่กำหนด');
@@ -827,7 +853,20 @@ function renderAreaChips(payload, point, buffer, count) {
   if (payload.osmOk) addAreaChip('ชื่อสถานที่ © OpenStreetMap', 'attribution');
 }
 
-function miniStat(label, value, metaText, metaNode) {
+/** ปุ่มข้อมูล (i) ที่แสดงคำอธิบายเมื่อวางเมาส์/โฟกัส/แตะ (ตัวป๊อปอัปจัดการด้านล่างในส่วน Info tips) */
+function infoTip(text, title = '') {
+  const tip = document.createElement('span');
+  tip.className = 'info-tip';
+  tip.setAttribute('role', 'button');
+  tip.tabIndex = 0;
+  tip.textContent = 'i';
+  tip.dataset.tip = text;
+  if (title) tip.dataset.tipTitle = title;
+  tip.setAttribute('aria-label', `คำอธิบาย${title ? `: ${title}` : ''}`);
+  return tip;
+}
+
+function miniStat(label, value, metaText, metaNode, valueTip) {
   const box = document.createElement('div');
   box.className = 'mini-stat';
 
@@ -838,7 +877,12 @@ function miniStat(label, value, metaText, metaNode) {
   const valueEl = document.createElement('strong');
   valueEl.textContent = value;
 
-  box.append(labelEl, valueEl);
+  const valueRow = document.createElement('div');
+  valueRow.className = 'mini-value';
+  valueRow.appendChild(valueEl);
+  if (valueTip) valueRow.appendChild(infoTip(valueTip.text, valueTip.title));
+
+  box.append(labelEl, valueRow);
 
   if (metaNode) {
     box.appendChild(metaNode);
@@ -852,34 +896,111 @@ function miniStat(label, value, metaText, metaNode) {
   return box;
 }
 
+/** ข้อความอธิบายชุดข้อมูล (cluster) เช่น «ปี 2568» (1 ม.ค. 68 – 31 ธ.ค. 68) */
+function clusterDescription(clusterId) {
+  const cluster = clusterId != null ? clusterById(clusterId) : null;
+  if (!cluster) return '';
+  const range = cluster.startDate && cluster.endDate ? ` (${thaiDate(cluster.startDate)} – ${thaiDate(cluster.endDate)})` : '';
+  return `«${cluster.name}»${range}`;
+}
+
 function renderAreaStats(payload, summary, buffer) {
   el.areaStats.replaceChildren();
   const cards = [];
 
   if (summary) {
+    const radius = fmtNum(summary.radius || buffer);
+    const period = `${thaiDate(summary.startDate)} – ${thaiDate(summary.endDate)}`;
     cards.push(
       miniStat(
-        `ในรัศมี ${fmtNum(summary.radius || buffer)} ม. · ${thaiDate(summary.startDate)}–${thaiDate(summary.endDate)}`,
+        `ในรัศมี ${radius} ม. · ${thaiDate(summary.startDate)}–${thaiDate(summary.endDate)}`,
         fmtNum(summary.totalAccident),
-        `เสียชีวิต ${fmtNum(summary.totalDeath)} · บาดเจ็บ ${fmtNum(summary.totalInjured)}`
+        `เสียชีวิต ${fmtNum(summary.totalDeath)} · บาดเจ็บ ${fmtNum(summary.totalInjured)}`,
+        null,
+        {
+          title: 'อุบัติเหตุในรัศมีรอบจุดที่เลือก',
+          text:
+            `จำนวนอุบัติเหตุที่เกิดภายในรัศมี ${radius} เมตรรอบจุดที่เลือก ช่วงวันที่ ${period} ตามที่ตั้งในแท็บตัวกรอง (สรุปจากข้อมูล RAIS ของ iTIC)\n` +
+            'บรรทัดล่างคือผลรวมผู้เสียชีวิตและผู้บาดเจ็บของอุบัติเหตุเหล่านี้\n' +
+            'ตัวเลขนี้ไม่ขึ้นกับแหล่งข้อมูลหรือระดับความรุนแรงที่เลือกในตัวกรอง จึงอาจไม่เท่ากับ “รายการอุบัติเหตุ” ในแท็บผลลัพธ์',
+        }
       )
     );
   }
 
   const district = payload.districtStats;
   if (district && district.districtName) {
+    const name = district.districtName;
+    const clusterText = clusterDescription(district.clusterId);
+    const clusterRef = clusterText ? `ชุดข้อมูลจุดเสี่ยง ${clusterText}` : 'ชุดข้อมูลจุดเสี่ยงของ iTIC (ดูช่วงเวลาได้ที่แท็บจุดเสี่ยง › ชุดข้อมูล)';
+    const criterion = district.orderTypeName ? `เรียงตาม “${district.orderTypeName}”` : 'เรียงตามเกณฑ์ของชุดข้อมูลที่ iTIC กำหนด';
+
+    // ชุดข้อมูลครอบคลุมช่วงวันที่ที่ค้นหาหรือไม่ (ตัวเลขนี้นับทั้งช่วงของชุดข้อมูล ไม่ใช่เฉพาะช่วงที่ค้นหา)
+    const cluster = district.clusterId != null ? clusterById(district.clusterId) : null;
+    const queryStart = (summary && summary.startDate) || (state.query && state.query.start_date) || '';
+    const queryEnd = (summary && summary.endDate) || (state.query && state.query.end_date) || '';
+    let coverageNote = '';
+    if (cluster && cluster.startDate && cluster.endDate && queryStart && queryEnd) {
+      const covers = cluster.startDate <= queryStart && cluster.endDate >= queryEnd;
+      const overlaps = cluster.startDate <= queryEnd && cluster.endDate >= queryStart;
+      if (!overlaps) {
+        coverageNote = `หมายเหตุ: ชุดข้อมูลนี้ไม่ทับซ้อนกับช่วงวันที่ที่ค้นหา (${thaiDate(queryStart)} – ${thaiDate(queryEnd)}) เพราะ iTIC ยังไม่มีชุดข้อมูลที่ตรงช่วงนั้น จึงใช้ชุดที่ใกล้ที่สุด`;
+      } else if (!covers) {
+        coverageNote = 'หมายเหตุ: ชุดข้อมูลนี้ครอบคลุมช่วงวันที่ที่ค้นหาเพียงบางส่วน';
+      }
+    }
+
     const meta = document.createElement('span');
     meta.className = 'mini-meta';
 
+    const part = (text, tip) => {
+      const span = document.createElement('span');
+      span.className = 'mini-part';
+      span.append(text);
+      if (tip) span.appendChild(infoTip(tip.text, tip.title));
+      return span;
+    };
+
     if (district.rankInProvince != null) {
-      meta.append(`อันดับ ${fmtNum(district.rankInProvince)} ในจังหวัด`);
-      if (district.levelInProvince) meta.append(levelBadge(district.levelInProvince));
-    }
-    if (district.rankInCluster != null) {
-      meta.append(`· อันดับ ${fmtNum(district.rankInCluster)} ในชุดข้อมูล`);
+      meta.appendChild(
+        part(`อันดับ ${fmtNum(district.rankInProvince)} ในจังหวัด`, {
+          title: 'อันดับในจังหวัด',
+          text: `อันดับของ${name} เมื่อเทียบกับเขต/อำเภออื่นในจังหวัดเดียวกัน ${criterion}\nอันดับ 1 = มากที่สุด`,
+        })
+      );
+      if (district.levelInProvince) {
+        const level = document.createElement('span');
+        level.className = 'mini-part';
+        level.appendChild(levelBadge(district.levelInProvince));
+        level.appendChild(
+          infoTip(
+            `ระดับความรุนแรง (มาก / ปานกลาง / น้อย) ที่ iTIC จัดให้${name} เมื่อเทียบกับเขต/อำเภออื่นในจังหวัด\nเป็นค่าจาก API ไม่ใช่ค่าที่แอปคำนวณ (ต่างจากระดับของจุดเสี่ยงในแท็บจุดเสี่ยง ซึ่งแอปคำนวณจากอันดับ)`,
+            'ระดับความรุนแรงของเขต/อำเภอ'
+          )
+        );
+        meta.appendChild(level);
+      }
     }
 
-    cards.push(miniStat(`เขต/อำเภอ ${district.districtName}`, fmtNum(district.totalAccident), null, meta));
+    if (district.rankInCluster != null) {
+      meta.appendChild(
+        part(`${district.rankInProvince != null ? '· ' : ''}อันดับ ${fmtNum(district.rankInCluster)} ในชุดข้อมูล`, {
+          title: 'อันดับในชุดข้อมูล',
+          text: `อันดับของ${name} เมื่อเทียบกับเขต/อำเภอทั้งหมดที่อยู่ในชุดข้อมูลเดียวกัน (${clusterText || 'ชุดข้อมูลจุดเสี่ยงของ iTIC'}) ${criterion}\nอันดับ 1 = มากที่สุด`,
+        })
+      );
+    }
+
+    cards.push(
+      miniStat(`เขต/อำเภอ ${name}`, fmtNum(district.totalAccident), null, meta, {
+        title: `จำนวนอุบัติเหตุของ${name}`,
+        text:
+          `จำนวนอุบัติเหตุรวมของ${name} (ค่า total_accident จาก iTIC) ตาม${clusterRef}\n` +
+          'แอปเลือกชุดข้อมูลที่ทับซ้อนกับช่วงวันที่ค้นหามากที่สุดให้ (เหมือนแผงจุดเสี่ยง) ตัวเลขนี้นับทั้งช่วงของชุดข้อมูล ไม่ใช่เฉพาะช่วงวันที่ที่ค้นหา และไม่ขึ้นกับตัวกรองอื่นในแอป\n' +
+          (coverageNote ? `${coverageNote}\n` : '') +
+          'ถ้าต้องการจำนวนตามช่วงที่ค้นหา ดูการ์ด “ในรัศมี …” หรือแท็บผลลัพธ์',
+      })
+    );
   }
 
   if (cards.length === 0) {
@@ -889,6 +1010,27 @@ function renderAreaStats(payload, summary, buffer) {
 
   el.areaStats.hidden = false;
   el.areaStats.append(...cards);
+}
+
+/**
+ * /api/area เรียก get_by_district โดยไม่ระบุชุดข้อมูล ทำให้ API เลือกชุดของตัวเอง (เช่น อุบัติเหตุ 2567)
+ * จึงขอสถิติอำเภอซ้ำด้วยชุดข้อมูลที่ตรงกับช่วงวันที่ค้นหา (เหมือนที่แผงจุดเสี่ยงเลือก) เพื่อให้ตัวเลขสอดคล้องกัน
+ */
+async function refineDistrictStats(payload, point, query) {
+  const current = payload.districtStats;
+  if (!current) return;
+
+  try {
+    await loadClusters();
+    const wanted = state.riskClusterTouched ? clusterById(el.riskCluster.value) : pickClusterForRange(query);
+    if (!wanted || Number(current.clusterId) === Number(wanted.id)) return;
+
+    const params = new URLSearchParams({ lat: point.lat, lon: point.lon, cluster_id: String(wanted.id) });
+    const result = await api(`/api/district-stats?${params.toString()}`);
+    if (result && result.district && result.district.districtName) payload.districtStats = result.district;
+  } catch (error) {
+    console.warn('district-stats:', error.message); // ใช้ค่าที่ API เลือกให้ต่อไป
+  }
 }
 
 async function loadAreaInfo(point, buffer, count, preferredTitle, query) {
@@ -915,6 +1057,8 @@ async function loadAreaInfo(point, buffer, count, preferredTitle, query) {
 
   const payload = areaResult.status === 'fulfilled' ? areaResult.value : {};
   const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+
+  await refineDistrictStats(payload, point, query);
 
   if (payload.districtStats && payload.districtStats.districtId) {
     const nextDistrictId = payload.districtStats.districtId;
@@ -1082,16 +1226,31 @@ el.eventsExport.addEventListener('click', () => {
 /* Map (Leaflet + CARTO basemaps)                                     */
 /* ================================================================== */
 
-const CARTO_KEY = 'cb1_3106_1_c281e24bf3fb043df74a3b66';
+/* คีย์ CARTO มาจากเซิร์ฟเวอร์ (อ่านจาก .env) เฉพาะผู้ใช้ที่ล็อกอินแล้ว — ไม่ฝังในโค้ดฝั่งเบราว์เซอร์ */
+let cartoKey = '';
 
-const TILE_ATTRIBUTION =
+const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const OSM_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
+const CARTO_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' +
   ' · &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
 
-const TILE_URLS = {
-  light: `https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`,
-  dark: `https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`,
+const CARTO_TILES = {
+  light: 'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+  dark: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
 };
+
+/** ชุดแผนที่ตามธีม: ใช้ CARTO เมื่อมีคีย์ ไม่งั้นถอยไปใช้ OSM มาตรฐาน */
+function tileSourceFor(theme) {
+  if (cartoKey) {
+    return {
+      url: `${CARTO_TILES[theme] || CARTO_TILES.light}?key=${encodeURIComponent(cartoKey)}`,
+      attribution: CARTO_ATTRIBUTION,
+    };
+  }
+  return { url: OSM_TILE_URL, attribution: OSM_ATTRIBUTION };
+}
 
 const MAP_MAX_ACCIDENTS = 4000;
 const MAP_MAX_RISKS = 400;
@@ -1126,6 +1285,7 @@ const mapState = {
   pin: null,
   pinMarker: null,
   circle: null,
+  mode: 'inspect', // 'inspect' = คลิกจุดเพื่อดูข้อมูล, 'area' = คลิกแผนที่เพื่อเลือกบริเวณ
   showRisks: true,
   located: 0,
   shown: 0,
@@ -1156,8 +1316,20 @@ function initMap() {
 
   setTileTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
 
+  // โหมด "เลือกบริเวณ" เท่านั้นที่คลิกแผนที่แล้วย้ายหมุด/ค้นหาใหม่
   map.on('click', (event) => {
+    if (mapState.mode !== 'area') return;
     movePin(event.latlng.lat, event.latlng.lng, { search: true });
+  });
+
+  // โหมด "เลือกบริเวณ": คลิกที่จุดอุบัติเหตุ/เหตุการณ์/จุดเสี่ยง ให้ใช้ตำแหน่งนั้นเป็นศูนย์กลาง ไม่เปิด popup
+  map.on('popupopen', (event) => {
+    if (mapState.mode !== 'area') return;
+    const source = event.popup && event.popup._source;
+    if (!source || typeof source.getLatLng !== 'function') return;
+    const at = source.getLatLng();
+    map.closePopup();
+    movePin(at.lat, at.lng, { search: true });
   });
 
   mapState.ready = true;
@@ -1167,11 +1339,12 @@ function initMap() {
 function setTileTheme(theme) {
   if (!mapState.map) return;
 
-  const layer = L.tileLayer(TILE_URLS[theme] || TILE_URLS.light, {
-    attribution: TILE_ATTRIBUTION,
+  const source = tileSourceFor(theme);
+  const layer = L.tileLayer(source.url, {
+    attribution: source.attribution,
     maxZoom: 20,
-    maxNativeZoom: 20,
-    detectRetina: true,
+    maxNativeZoom: cartoKey ? 20 : 19,
+    detectRetina: Boolean(cartoKey),
   });
 
   layer.addTo(mapState.map);
@@ -1292,13 +1465,17 @@ function renderMap() {
   const point = state.query && state.query.point ? state.query.point : null;
   const buffer = Number(state.query && state.query.buffer) || 0;
 
+  mapState.map.invalidateSize();
+
   if (rows.length === 0 && !point) {
-    el.mapCard.hidden = true;
+    mapState.accidents.clearLayers();
+    mapState.pin.clearLayers();
+    mapState.pinMarker = null;
+    mapState.circle = null;
+    mapState.shown = 0;
+    if (state.query) el.mapSub.textContent = 'ไม่พบข้อมูลตามเงื่อนไขที่กำหนด';
     return;
   }
-
-  el.mapCard.hidden = false;
-  mapState.map.invalidateSize();
 
   mapState.accidents.clearLayers();
   mapState.pin.clearLayers();
@@ -1322,6 +1499,7 @@ function renderMap() {
   const shown = located.slice(0, MAP_MAX_ACCIDENTS);
   for (const { accident, ll } of shown) {
     L.circleMarker(ll, {
+      bubblingMouseEvents: false,
       radius: 5,
       weight: 1,
       color: '#ffffff',
@@ -1341,6 +1519,7 @@ function renderMap() {
 
     if (buffer > 0) {
       mapState.circle = L.circle(latlng, {
+        interactive: false, // วงรัศมีเป็นแค่ภาพ ต้องไม่บังการคลิกจุดอุบัติเหตุที่อยู่ข้างใน
         radius: buffer,
         color: '#0f766e',
         weight: 1.5,
@@ -1365,9 +1544,19 @@ function renderMap() {
     });
   }
 
+  applyMapMode();
+
   renderEventMarkers();
   renderRiskMarkers();
   updateMapSummary();
+}
+
+/** ดันจุดอุบัติเหตุขึ้นบนสุดของแคนวาส ไม่ให้ถูกวงแหวนจุดเสี่ยง/เหตุการณ์สดที่วาดทีหลังทับ */
+function raiseAccidents() {
+  if (!mapState.ready || !mapState.map.hasLayer(mapState.accidents)) return;
+  mapState.accidents.eachLayer((layer) => {
+    if (typeof layer.bringToFront === 'function') layer.bringToFront();
+  });
 }
 
 function renderEventMarkers() {
@@ -1377,6 +1566,7 @@ function renderEventMarkers() {
   for (const event of state.events) {
     if (!Number.isFinite(event.lat) || !Number.isFinite(event.lon)) continue;
     L.circleMarker([event.lat, event.lon], {
+      bubblingMouseEvents: false,
       radius: 8,
       weight: 2,
       color: '#ffffff',
@@ -1387,6 +1577,7 @@ function renderEventMarkers() {
       .bindPopup(() => eventPopup(event), { minWidth: 220 })
       .addTo(mapState.events);
   }
+  raiseAccidents();
   updateMapSummary();
 }
 
@@ -1414,6 +1605,7 @@ function renderRiskMarkers() {
           : { radius: 5.5, weight: 1, opacity: 0.5, fillOpacity: 0.06 };
 
     L.circleMarker([lat, lon], {
+      bubblingMouseEvents: false,
       ...style,
       color: LEVEL_COLORS[level] || '#0f766e',
       fillColor: LEVEL_COLORS[level] || '#0f766e',
@@ -1421,6 +1613,7 @@ function renderRiskMarkers() {
       .bindPopup(() => riskPopup(spot, level), { minWidth: 230 })
       .addTo(mapState.risks);
   }
+  raiseAccidents();
   updateMapSummary();
 }
 
@@ -1484,6 +1677,35 @@ function fitToResults() {
   } else {
     mapState.map.fitBounds(bounds, { padding: [26, 26], maxZoom: 16 });
   }
+}
+
+/** ปรับหน้าตา/พฤติกรรมแผนที่ตามโหมดปัจจุบัน */
+function applyMapMode() {
+  const area = mapState.mode === 'area';
+
+  el.map.classList.toggle('is-area-mode', area);
+
+  const hint = document.getElementById('mode-hint');
+  if (hint) hint.hidden = !area;
+
+  for (const [id, active] of [['mode-inspect', !area], ['mode-area', area]]) {
+    const button = document.getElementById(id);
+    if (!button) continue;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+
+  // ลากหมุดย้ายจุดได้เฉพาะโหมดเลือกบริเวณ
+  if (mapState.pinMarker && mapState.pinMarker.dragging) {
+    if (area) mapState.pinMarker.dragging.enable();
+    else mapState.pinMarker.dragging.disable();
+  }
+}
+
+function setMapMode(mode) {
+  mapState.mode = mode === 'area' ? 'area' : 'inspect';
+  if (mapState.ready && mapState.mode === 'area') mapState.map.closePopup();
+  applyMapMode();
 }
 
 /** ย้ายหมุดค้นหา (จากลากหมุด / คลิกแผนที่ / popup) */
@@ -1827,7 +2049,6 @@ function focusRisk(spot) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
   if (!initMap()) return;
 
-  el.mapCard.hidden = false;
   mapState.map.invalidateSize();
   mapState.map.setView([lat, lon], 17, { animate: true });
 
@@ -1837,7 +2058,9 @@ function focusRisk(spot) {
     .setContent(riskPopup(spot, level))
     .openOn(mapState.map);
 
-  el.mapCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (window.matchMedia('(max-width: 860px)').matches) {
+    el.mapCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 el.riskCluster.addEventListener('change', () => {
@@ -1856,6 +2079,8 @@ el.riskOrder.addEventListener('change', () => loadRisk(state.query));
 el.riskMapToggle.addEventListener('click', () => {
   mapState.showRisks = !mapState.showRisks;
   el.riskMapToggle.textContent = mapState.showRisks ? 'ซ่อนจุดเสี่ยงบนแผนที่' : 'แสดงจุดเสี่ยงบนแผนที่';
+  const layerRisks = document.getElementById('layer-risks');
+  if (layerRisks) layerRisks.checked = mapState.showRisks;
   renderRiskMarkers();
 });
 
@@ -2321,6 +2546,554 @@ el.exportDetailBtn.addEventListener('click', () => {
   downloadCSV(exportFilename('_victims'), header, rows);
   setStatus(`ส่งออก CSV รายละเอียด ${fmtNum(rows.length)} แถวแล้ว`);
 });
+
+/* ================================================================== */
+/* Workspace UI (tabs, side panel, layers, table drawer, export menu) */
+/* ================================================================== */
+
+const ui = {
+  tabs: Array.from(document.querySelectorAll('.tab')),
+  panes: Array.from(document.querySelectorAll('.tab-pane')),
+  panelToggle: $('panel-toggle'),
+  tableToggle: $('table-toggle'),
+  openTable: $('open-table'),
+  exportMenu: $('export-menu'),
+  exportToggle: $('export-toggle'),
+  exportPop: $('export-pop'),
+  mapSearch: $('map-search'),
+  mapSearchBox: $('map-search-box'),
+  mapSearchResults: $('map-search-results'),
+  layerAccidents: $('layer-accidents'),
+  layerRisks: $('layer-risks'),
+  layerEvents: $('layer-events'),
+  stage: $('stage'),
+  stageBar: document.querySelector('.stage-bar'),
+  splitter: $('splitter'),
+  drawerGrip: $('drawer-grip'),
+  tableExpand: $('table-expand'),
+  fullscreenToggle: $('fullscreen-toggle'),
+  modeInspect: $('mode-inspect'),
+  modeArea: $('mode-area'),
+};
+
+/* ------------------------------- tabs -------------------------------- */
+
+function activateTab(name, { focus = false } = {}) {
+  for (const tab of ui.tabs) {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle('is-active', active);
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+    if (active && focus) tab.focus();
+  }
+  for (const pane of ui.panes) {
+    pane.hidden = pane.dataset.pane !== name;
+    pane.classList.toggle('is-active', pane.dataset.pane === name);
+  }
+  // ถ้าแผงถูกซ่อนอยู่ ให้เปิดกลับมาเมื่อผู้ใช้เลือกแท็บ
+  if (el.appView.classList.contains('panel-collapsed')) setPanelCollapsed(false);
+}
+
+for (const tab of ui.tabs) {
+  tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+  tab.addEventListener('keydown', (event) => {
+    const index = ui.tabs.indexOf(tab);
+    let next = -1;
+    if (event.key === 'ArrowRight') next = (index + 1) % ui.tabs.length;
+    else if (event.key === 'ArrowLeft') next = (index - 1 + ui.tabs.length) % ui.tabs.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = ui.tabs.length - 1;
+    if (next < 0) return;
+    event.preventDefault();
+    activateTab(ui.tabs[next].dataset.tab, { focus: true });
+  });
+}
+
+/* ---------------------------- side panel ----------------------------- */
+
+function setPanelCollapsed(collapsed) {
+  el.appView.classList.toggle('panel-collapsed', collapsed);
+  ui.panelToggle.textContent = collapsed ? 'แสดงแผง' : 'ซ่อนแผง';
+  ui.panelToggle.setAttribute('aria-expanded', String(!collapsed));
+}
+
+ui.panelToggle.addEventListener('click', () => {
+  setPanelCollapsed(!el.appView.classList.contains('panel-collapsed'));
+});
+
+/* ----------------------------- table drawer -------------------------- */
+
+function setDrawer(open) {
+  el.tableCard.dataset.open = String(open);
+  ui.tableToggle.setAttribute('aria-expanded', String(open));
+  ui.tableExpand.hidden = !open;
+}
+
+/** ขยายตารางให้เต็มพื้นที่แผนที่ (ทับแผนที่) หรือย่อกลับ */
+function setDrawerFull(full) {
+  el.tableCard.dataset.size = full ? 'full' : 'normal';
+  ui.tableExpand.textContent = full ? 'ย่อตาราง' : 'ขยายเต็มพื้นที่';
+  ui.tableExpand.setAttribute('aria-pressed', String(full));
+}
+
+ui.tableToggle.addEventListener('click', () => {
+  setDrawer(el.tableCard.dataset.open !== 'true');
+});
+
+ui.openTable.addEventListener('click', () => setDrawer(true));
+
+ui.tableExpand.addEventListener('click', () => {
+  setDrawerFull(el.tableCard.dataset.size !== 'full');
+});
+
+/* ลากขอบบนของตารางเพื่อปรับความสูง */
+function setDrawerHeight(px) {
+  const stageHeight = ui.stage.getBoundingClientRect().height;
+  const barHeight = ui.stageBar.getBoundingClientRect().height;
+  const max = Math.max(180, stageHeight - barHeight - 48);
+  const height = Math.min(max, Math.max(160, px));
+  el.tableCard.style.setProperty('--drawer-h', `${Math.round(height)}px`);
+}
+
+ui.drawerGrip.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  ui.drawerGrip.setPointerCapture(event.pointerId);
+  document.body.classList.add('is-resizing');
+  setDrawerFull(false);
+
+  const move = (moveEvent) => {
+    const bottom = ui.stage.getBoundingClientRect().bottom;
+    setDrawerHeight(bottom - moveEvent.clientY);
+  };
+  const stop = () => {
+    ui.drawerGrip.removeEventListener('pointermove', move);
+    ui.drawerGrip.removeEventListener('pointerup', stop);
+    ui.drawerGrip.removeEventListener('pointercancel', stop);
+    document.body.classList.remove('is-resizing');
+  };
+  ui.drawerGrip.addEventListener('pointermove', move);
+  ui.drawerGrip.addEventListener('pointerup', stop);
+  ui.drawerGrip.addEventListener('pointercancel', stop);
+});
+
+ui.drawerGrip.addEventListener('dblclick', () => setDrawerFull(true));
+
+ui.drawerGrip.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+  event.preventDefault();
+  const current = el.tableCard.getBoundingClientRect().height;
+  setDrawerHeight(current + (event.key === 'ArrowUp' ? 32 : -32));
+});
+
+/* -------------------- ปรับความกว้างแผงด้านซ้าย (splitter) -------------------- */
+
+const PANEL_WIDTH_KEY = 'itic-panel-width';
+const PANEL_MIN = 300;
+
+function panelMax() {
+  return Math.max(PANEL_MIN + 40, Math.min(window.innerWidth - 360, Math.round(window.innerWidth * 0.75)));
+}
+
+function setPanelWidth(px, { persist = true } = {}) {
+  const width = Math.round(Math.min(panelMax(), Math.max(PANEL_MIN, px)));
+  el.appView.style.setProperty('--panel-w', `${width}px`);
+  ui.splitter.setAttribute('aria-valuenow', String(width));
+  ui.splitter.setAttribute('aria-valuemax', String(panelMax()));
+  if (persist) {
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+    } catch {
+      /* ใช้งานต่อได้ แม้จดจำความกว้างไม่ได้ */
+    }
+  }
+}
+
+function resetPanelWidth() {
+  el.appView.style.removeProperty('--panel-w');
+  ui.splitter.removeAttribute('aria-valuenow');
+  try {
+    localStorage.removeItem(PANEL_WIDTH_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+ui.splitter.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  ui.splitter.setPointerCapture(event.pointerId);
+  document.body.classList.add('is-resizing');
+  if (el.appView.classList.contains('panel-collapsed')) setPanelCollapsed(false);
+
+  const left = el.appView.getBoundingClientRect().left;
+  const move = (moveEvent) => setPanelWidth(moveEvent.clientX - left);
+  const stop = () => {
+    ui.splitter.removeEventListener('pointermove', move);
+    ui.splitter.removeEventListener('pointerup', stop);
+    ui.splitter.removeEventListener('pointercancel', stop);
+    document.body.classList.remove('is-resizing');
+  };
+  ui.splitter.addEventListener('pointermove', move);
+  ui.splitter.addEventListener('pointerup', stop);
+  ui.splitter.addEventListener('pointercancel', stop);
+});
+
+ui.splitter.addEventListener('dblclick', resetPanelWidth);
+
+ui.splitter.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  event.preventDefault();
+  const current = document.getElementById('panel').getBoundingClientRect().width;
+  setPanelWidth(current + (event.key === 'ArrowRight' ? 24 : -24));
+});
+
+try {
+  const savedWidth = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+  if (Number.isFinite(savedWidth) && savedWidth >= PANEL_MIN) setPanelWidth(savedWidth, { persist: false });
+} catch {
+  /* ไม่มีค่าที่บันทึกไว้ */
+}
+
+window.addEventListener('resize', () => {
+  const current = Number.parseFloat(el.appView.style.getPropertyValue('--panel-w'));
+  if (Number.isFinite(current) && current > panelMax()) setPanelWidth(current, { persist: false });
+});
+
+/* ------------------------- แผนที่เต็มจอ ------------------------- */
+
+function setStageFullscreen(on) {
+  ui.stage.classList.toggle('is-fullscreen', on);
+  document.body.classList.toggle('stage-fs', on);
+  ui.fullscreenToggle.textContent = on ? 'ออกจากเต็มจอ' : 'เต็มจอ';
+  ui.fullscreenToggle.setAttribute('aria-pressed', String(on));
+
+  // ขอโหมดเต็มจอของเบราว์เซอร์ด้วยถ้ามี (iOS ไม่รองรับ จึงใช้การขยายเต็มหน้าต่างแทน)
+  const root = document.documentElement;
+  if (on && !document.fullscreenElement && root.requestFullscreen) {
+    root.requestFullscreen().catch(() => {});
+  } else if (!on && document.fullscreenElement && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+  }
+  if (mapState.ready) setTimeout(() => mapState.map.invalidateSize(), 50);
+}
+
+ui.fullscreenToggle.addEventListener('click', () => {
+  setStageFullscreen(!ui.stage.classList.contains('is-fullscreen'));
+});
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && ui.stage.classList.contains('is-fullscreen')) setStageFullscreen(false);
+});
+
+/* ---------------------- โหมดคลิกบนแผนที่ ---------------------- */
+
+ui.modeInspect.addEventListener('click', () => setMapMode('inspect'));
+ui.modeArea.addEventListener('click', () => setMapMode('area'));
+
+/* ----------------------------- export menu --------------------------- */
+
+function setExportMenu(open) {
+  ui.exportPop.hidden = !open;
+  ui.exportToggle.setAttribute('aria-expanded', String(open));
+}
+
+ui.exportToggle.addEventListener('click', (event) => {
+  event.stopPropagation();
+  setExportMenu(ui.exportPop.hidden);
+});
+
+ui.exportPop.addEventListener('click', () => setExportMenu(false));
+
+/* --------------------------- map layer toggles ----------------------- */
+
+function setLayerVisible(group, visible) {
+  if (!mapState.ready || !group) return;
+  const has = mapState.map.hasLayer(group);
+  if (visible && !has) mapState.map.addLayer(group);
+  if (!visible && has) mapState.map.removeLayer(group);
+  raiseAccidents();
+}
+
+ui.layerAccidents.addEventListener('change', () => setLayerVisible(mapState.accidents, ui.layerAccidents.checked));
+ui.layerEvents.addEventListener('change', () => setLayerVisible(mapState.events, ui.layerEvents.checked));
+ui.layerRisks.addEventListener('change', () => {
+  // ใช้สถานะเดียวกับปุ่มในแท็บจุดเสี่ยง
+  if (mapState.showRisks !== ui.layerRisks.checked) el.riskMapToggle.click();
+});
+
+/* ------------------------ floating place search ---------------------- */
+
+let mapSearchSeq = 0;
+
+function hideMapSearchResults() {
+  ui.mapSearchResults.hidden = true;
+  ui.mapSearchResults.replaceChildren();
+}
+
+/** เลือกสถานที่จากช่องค้นหาบนแผนที่ → ใช้ตัวแปร/ช่องเดียวกับแท็บตัวกรอง แล้วค้นหาทันที */
+function pickPlace(index) {
+  el.placeResult.selectedIndex = index;
+  applyPlace(index);
+  hideMapSearchResults();
+  requestSearch();
+}
+
+async function runMapSearch() {
+  const query = ui.mapSearch.value.trim();
+  if (query.length < 2) {
+    setStatus('พิมพ์ชื่อสถานที่อย่างน้อย 2 ตัวอักษร', 'error');
+    return;
+  }
+
+  const seq = ++mapSearchSeq;
+  setStatus('กำลังค้นหาสถานที่…', 'busy');
+
+  try {
+    const payload = await api(`/api/geocode?q=${encodeURIComponent(query)}`);
+    if (seq !== mapSearchSeq) return;
+
+    const items = payload.data || [];
+    if (items.length === 0) {
+      hideMapSearchResults();
+      setStatus('ไม่พบสถานที่ที่ค้นหา ลองระบุชื่อให้ชัดเจนขึ้น', 'error');
+      return;
+    }
+
+    placeItems = items;
+    el.placeQuery.value = query;
+    el.placeResult.replaceChildren(
+      ...items.map((item, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = item.displayName;
+        return option;
+      })
+    );
+    el.placeResultField.hidden = false;
+    setStatus('');
+
+    if (items.length === 1) {
+      pickPlace(0);
+      return;
+    }
+
+    ui.mapSearchResults.replaceChildren(
+      ...items.map((item, index) => {
+        const li = document.createElement('li');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = item.displayName;
+        button.addEventListener('click', () => pickPlace(index));
+        li.appendChild(button);
+        return li;
+      })
+    );
+    ui.mapSearchResults.hidden = false;
+  } catch (error) {
+    if (seq === mapSearchSeq) setStatus(error.message, 'error');
+  }
+}
+
+ui.mapSearch.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    runMapSearch();
+  } else if (event.key === 'Escape') {
+    hideMapSearchResults();
+  }
+});
+
+document.addEventListener('click', (event) => {
+  if (!ui.mapSearchBox.contains(event.target)) hideMapSearchResults();
+  if (!ui.exportMenu.contains(event.target)) setExportMenu(false);
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  const menuOpen = !ui.exportPop.hidden || !ui.mapSearchResults.hidden;
+  setExportMenu(false);
+  hideMapSearchResults();
+  // Esc ครั้งแรกปิดเมนูก่อน ครั้งถัดไปจึงออกจากเต็มจอ (กรณีไม่ได้ใช้ Fullscreen API)
+  if (!menuOpen && ui.stage.classList.contains('is-fullscreen') && !document.fullscreenElement) {
+    setStageFullscreen(false);
+  }
+});
+
+/* ------------------- เลือกจังหวัด → แผนที่เลื่อนไปที่จังหวัด ------------------- */
+
+let provinceFlySeq = 0;
+
+el.province.addEventListener('change', async () => {
+  const info = provinceByCode.get(String(el.province.value));
+  if (!info || !mapState.ready) return;
+
+  const seq = ++provinceFlySeq;
+  const name = info.name.startsWith('กรุงเทพ') ? info.name : `จังหวัด${info.name}`;
+
+  try {
+    const payload = await api(`/api/geocode?q=${encodeURIComponent(name)}`);
+    const first = (payload.data || [])[0];
+    if (seq !== provinceFlySeq || !first) return;
+    mapState.map.setView([first.lat, first.lon], 10, { animate: true });
+  } catch {
+    /* ไม่เลื่อนแผนที่ ถ้าหาพิกัดจังหวัดไม่ได้ */
+  }
+});
+
+/* ------------- ตัวเลขบนแท็บ + เปิด/ปิดปุ่มส่งออกตามข้อมูลที่มี ------------- */
+
+function setIfChanged(node, prop, value) {
+  if (node[prop] !== value) node[prop] = value;
+}
+
+function refreshChrome() {
+  const counts = {
+    results: state.view.length,
+    risk: state.risk && state.risk.rows ? state.risk.rows.length : 0,
+    events: state.events.length,
+  };
+
+  for (const badge of document.querySelectorAll('.tab-count')) {
+    const count = counts[badge.dataset.count] || 0;
+    setIfChanged(badge, 'textContent', count ? fmtNum(count) : '');
+    setIfChanged(badge, 'hidden', count === 0);
+  }
+
+  const hasRows = state.view.length > 0;
+  setIfChanged(el.exportBtn, 'disabled', !hasRows);
+  setIfChanged(el.exportDetailBtn, 'disabled', !hasRows);
+  setIfChanged(el.eventsExport, 'disabled', state.events.length === 0);
+  setIfChanged(ui.openTable, 'hidden', !hasRows);
+}
+
+let chromeFrame = 0;
+new MutationObserver(() => {
+  if (chromeFrame) return;
+  chromeFrame = requestAnimationFrame(() => {
+    chromeFrame = 0;
+    refreshChrome();
+  });
+}).observe(el.appView, { subtree: true, childList: true, attributes: true, attributeFilter: ['hidden'] });
+
+refreshChrome();
+
+/* ความสูงแถบด้านบนของแผนที่ (ใช้กำหนดขอบบนของตารางตอนขยายเต็ม) */
+function syncBarHeight() {
+  ui.stage.style.setProperty('--bar-h', `${ui.stageBar.offsetHeight}px`);
+}
+syncBarHeight();
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(syncBarHeight).observe(ui.stageBar);
+
+/* แผนที่ปรับขนาดเองเมื่อแผง/ลิ้นชักตาราง/หน้าต่างเปลี่ยนขนาด */
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    if (mapState.ready) mapState.map.invalidateSize();
+  }).observe(el.map);
+}
+
+/* ================================================================== */
+/* Info tips — ปุ่ม (i) อธิบายตัวเลข                                   */
+/* ================================================================== */
+
+const infoPop = document.createElement('div');
+infoPop.id = 'info-pop';
+infoPop.className = 'info-pop';
+infoPop.setAttribute('role', 'tooltip');
+infoPop.hidden = true;
+document.body.appendChild(infoPop);
+
+let infoOwner = null;
+let infoPinned = false;
+
+function hideInfo() {
+  if (infoOwner) infoOwner.removeAttribute('aria-describedby');
+  infoOwner = null;
+  infoPinned = false;
+  infoPop.hidden = true;
+}
+
+function showInfo(tip, pinned) {
+  const text = tip.dataset.tip || '';
+  if (!text) return;
+
+  infoPop.replaceChildren();
+  if (tip.dataset.tipTitle) {
+    const title = document.createElement('strong');
+    title.textContent = tip.dataset.tipTitle;
+    infoPop.appendChild(title);
+  }
+  for (const line of text.split('\n').filter(Boolean)) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    infoPop.appendChild(p);
+  }
+
+  if (infoOwner && infoOwner !== tip) infoOwner.removeAttribute('aria-describedby');
+  infoOwner = tip;
+  infoPinned = pinned;
+  tip.setAttribute('aria-describedby', 'info-pop');
+
+  infoPop.hidden = false;
+  infoPop.style.left = '0px';
+  infoPop.style.top = '0px';
+
+  const rect = tip.getBoundingClientRect();
+  const width = infoPop.offsetWidth;
+  const height = infoPop.offsetHeight;
+  const margin = 8;
+
+  const left = Math.min(Math.max(margin, rect.left + rect.width / 2 - width / 2), window.innerWidth - width - margin);
+  let top = rect.bottom + 8;
+  if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 8);
+
+  infoPop.style.left = `${Math.round(Math.max(margin, left))}px`;
+  infoPop.style.top = `${Math.round(top)}px`;
+}
+
+document.addEventListener('click', (event) => {
+  const tip = event.target.closest && event.target.closest('.info-tip');
+  if (tip) {
+    event.preventDefault(); // ไม่ให้ไปกระตุ้น <label>/แถวที่ครอบอยู่
+    if (infoOwner === tip && infoPinned) hideInfo();
+    else showInfo(tip, true);
+    return;
+  }
+  if (!infoPop.hidden && !infoPop.contains(event.target)) hideInfo();
+}, true);
+
+document.addEventListener('mouseover', (event) => {
+  const tip = event.target.closest && event.target.closest('.info-tip');
+  if (tip && !infoPinned) showInfo(tip, false);
+});
+
+document.addEventListener('mouseout', (event) => {
+  const tip = event.target.closest && event.target.closest('.info-tip');
+  if (tip && !infoPinned && infoOwner === tip) hideInfo();
+});
+
+document.addEventListener('focusin', (event) => {
+  const tip = event.target.closest && event.target.closest('.info-tip');
+  if (tip && !infoPinned) showInfo(tip, false);
+});
+
+document.addEventListener('focusout', (event) => {
+  const tip = event.target.closest && event.target.closest('.info-tip');
+  if (tip && !infoPinned && infoOwner === tip) hideInfo();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    hideInfo();
+    return;
+  }
+  const tip = event.target.closest && event.target.closest('.info-tip');
+  if (tip && (event.key === 'Enter' || event.key === ' ')) {
+    event.preventDefault();
+    tip.click();
+  }
+});
+
+window.addEventListener('scroll', hideInfo, true);
+window.addEventListener('resize', hideInfo);
 
 /* ================================================================== */
 /* Boot                                                               */

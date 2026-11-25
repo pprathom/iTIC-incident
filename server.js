@@ -49,6 +49,8 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const API_BASE = (process.env.API_BASE || 'https://api.iticfoundation.org/accidents').replace(/\/+$/, '');
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 8 * 60 * 60 * 1000); // 8 h
+/** คีย์ CARTO Basemaps (เก็บใน .env เท่านั้น) — ส่งให้เบราว์เซอร์เฉพาะผู้ใช้ที่ล็อกอินแล้ว */
+const CARTO_KEY = String(process.env.CARTO_KEY || '').trim();
 const UPSTREAM_TIMEOUT_MS = 60_000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const COOKIE_NAME = 'itic_sid';
@@ -270,6 +272,7 @@ async function handleLogin(req, res) {
       roles: data.roles || [],
       permissions: data.permissions || [],
       expiresIn: maxAge,
+      map: { cartoKey: CARTO_KEY },
     },
     {
       'Set-Cookie': `${COOKIE_NAME}=${id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`,
@@ -294,6 +297,7 @@ function handleSession(req, res) {
     roles: session.roles,
     permissions: session.permissions,
     expiresIn: Math.floor((session.expiresAt - Date.now()) / 1000),
+    map: { cartoKey: CARTO_KEY },
   });
 }
 
@@ -784,6 +788,8 @@ async function handleArea(req, res) {
           levelInCluster: district.severity_level_in_cluster || '',
           rankInProvince: district.rank_in_province ?? null,
           levelInProvince: district.severity_level_in_province || '',
+          clusterId: district.cluster_id ?? null,
+          orderTypeName: district.order_type_name || '',
         }
       : null,
   };
@@ -989,5 +995,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`\n  iTIC Accident Data Explorer`);
   console.log(`  ➜  http://${HOST}:${PORT}`);
-  console.log(`  ➜  upstream: ${API_BASE}\n`);
+  console.log(`  ➜  upstream: ${API_BASE}`);
+  console.log(`  ➜  CARTO basemaps: ${CARTO_KEY ? 'เปิดใช้ (คีย์จาก .env)' : 'ไม่พบ CARTO_KEY — ใช้แผนที่ OSM แทน'}\n`);
 });
