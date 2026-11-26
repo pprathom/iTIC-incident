@@ -2,3 +2,6 @@ node_modules/
 .env
 *.log
 .DS_Store
+# ข้อมูลเหตุการณ์ (นกฮูก) ห้ามอัปโหลดขึ้น git
+data/events/*
+!data/events/.gitkeep

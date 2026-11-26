@@ -1326,3 +1326,41 @@ th .info-tip { margin-left: 4px; }
 .info-pop strong { font-size: 13px; font-weight: 650; }
 .info-pop p { margin: 0; color: var(--muted); }
 .info-pop p:first-of-type:last-child { color: var(--text); }
+
+/* ================================================================ */
+/* v9 — เหตุการณ์จราจร (คลังย้อนหลัง + สด)                              */
+/* ================================================================ */
+
+.ev-filter { display: grid; gap: 10px; padding: 14px; box-shadow: none; }
+.ev-head h3 { margin: 0; }
+.ev-source, .ev-range { margin: 0; font-size: 12.5px; line-height: 1.55; }
+.ev-range:empty { display: none; }
+
+.ev-types-wrap { display: grid; gap: 6px; }
+.ev-types-label { font-size: 13px; font-weight: 600; color: var(--muted); display: inline-flex; align-items: center; }
+.ev-types { display: flex; flex-wrap: wrap; gap: 6px; }
+.ev-types:empty::before { content: "ตัวเลือกประเภทจะแสดงหลังค้นหา"; font-size: 12.5px; color: var(--muted); }
+
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip[aria-pressed="true"]:hover { background: var(--accent); color: #fff; }
+.ev-chip { font-variant-numeric: tabular-nums; }
+
+.events-card .events-list { max-height: none; overflow: visible; }
+.events-list .event-item { cursor: pointer; }
+.events-list .event-item:hover, .events-list .event-item:focus-visible { border-color: var(--accent); background: var(--accent-soft); }
+.events-list .event-item:focus-visible { outline-offset: 1px; }
+.events-list .event-empty { cursor: default; justify-content: center; padding: 18px 10px; }
+.events-card .btn-block { margin-top: 10px; }
+
+.badge.ev-other { background: #e2e8f0; color: #334155; }
+.badge.ev-roadclosed, .badge.ev-diversion, .badge.ev-construction, .badge.ev-protest { white-space: nowrap; }
+.events-list .badge { flex: 0 0 auto; }
+
+.badge.ev-rain { background: #cffafe; color: #155e75; }
+.badge.ev-info { background: #dbeafe; color: #1e40af; }
+.badge.ev-checkpoint { background: #ccfbf1; color: #115e59; }
+.badge.ev-trafficjam { background: #ffedd5; color: #7c2d12; }
+.badge.ev-warning { background: #fef9c3; color: #854d0e; }
+.badge.ev-sale { background: #dcfce7; color: #166534; }
+.badge.ev-complaint { background: #fae8ff; color: #86198f; }
+.badge.ev-misc { background: #e2e8f0; color: #334155; }

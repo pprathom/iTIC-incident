@@ -18,7 +18,7 @@
       })();
     </script>
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
-    <link rel="stylesheet" href="styles.css?v=8" />
+    <link rel="stylesheet" href="styles.css?v=10" />
   </head>
   <body>
     <header class="topbar">
@@ -75,7 +75,7 @@
             <button type="button" class="tab is-active" role="tab" id="tab-filters" aria-selected="true" aria-controls="pane-filters" data-tab="filters">ตัวกรอง</button>
             <button type="button" class="tab" role="tab" id="tab-results" aria-selected="false" aria-controls="pane-results" data-tab="results" tabindex="-1">ผลลัพธ์<span class="tab-count" data-count="results" hidden></span></button>
             <button type="button" class="tab" role="tab" id="tab-risk" aria-selected="false" aria-controls="pane-risk" data-tab="risk" tabindex="-1">จุดเสี่ยง<span class="tab-count" data-count="risk" hidden></span></button>
-            <button type="button" class="tab" role="tab" id="tab-events" aria-selected="false" aria-controls="pane-events" data-tab="events" tabindex="-1">เหตุการณ์สด<span class="tab-count" data-count="events" hidden></span></button>
+            <button type="button" class="tab" role="tab" id="tab-events" aria-selected="false" aria-controls="pane-events" data-tab="events" tabindex="-1">เหตุการณ์จราจร<span class="tab-count" data-count="events" hidden></span></button>
           </div>
 
           <!-- ---------------- ตัวกรอง ---------------- -->
@@ -285,19 +285,61 @@
             <p class="pane-empty">จุดเสี่ยงจะแสดงหลังค้นหาข้อมูลที่มีผลลัพธ์</p>
           </div>
 
-          <!-- ---------------- เหตุการณ์สด ---------------- -->
+          <!-- ---------------- เหตุการณ์จราจร ---------------- -->
           <div class="tab-pane" role="tabpanel" id="pane-events" aria-labelledby="tab-events" data-pane="events" hidden>
-            <div class="card events-card" id="events-card" hidden>
+            <div class="card ev-filter" id="ev-filter">
+              <div class="ev-head">
+                <h3>เหตุการณ์จราจร</h3>
+                <p class="muted ev-source"><span id="ev-source-text">กำลังตรวจสอบแหล่งข้อมูล…</span><span role="button" tabindex="0" class="info-tip" data-tip-title="แหล่งข้อมูลเหตุการณ์" data-tip="คลังย้อนหลัง = ไฟล์ของนกฮูกที่นำเข้าไว้ในเซิร์ฟเวอร์ (โหลดใหม่อัตโนมัติเมื่อไฟล์เปลี่ยน)&#10;เหตุการณ์สด = feed ของ Longdo อัปเดตทุก 1 นาที&#10;สองแหล่งเป็นข้อมูลชุดเดียวกัน ถ้ารหัสเหตุการณ์ (eid) ซ้ำกันจะใช้ข้อมูลสด" aria-label="คำอธิบาย: แหล่งข้อมูลเหตุการณ์">i</span></p>
+              </div>
+              <p class="muted ev-range" id="ev-range"></p>
+
+              <div class="input-row">
+                <input id="ev-q" type="search" placeholder="ค้นหาหัวข้อหรือรายละเอียด เช่น น้ำท่วม สะพาน" autocomplete="off" aria-label="คำค้นเหตุการณ์จราจร" />
+                <button type="button" class="btn btn-primary btn-sm" id="ev-search">ค้นหา</button>
+              </div>
+
+              <div class="grid-2">
+                <label class="field">
+                  <span>ช่วงเวลา<span role="button" tabindex="0" class="info-tip" data-tip-title="ช่วงเวลา" data-tip="เริ่มในช่วง: นับเหตุการณ์ที่เวลาเริ่ม (start) อยู่ในช่วงวันที่ที่ตั้งในแท็บตัวกรอง&#10;มีผลอยู่ในช่วง: นับเหตุการณ์ที่ช่วง start–stop ทับซ้อนกับช่วงวันที่นั้น เหมาะกับน้ำท่วมหรือปิดถนนที่ยาวหลายวัน&#10;ที่ยังมีผลอยู่ตอนนี้: ไม่ใช้ช่วงวันที่ ดูเฉพาะรายการที่ยังไม่หมดเวลา ณ ตอนนี้&#10;หมายเหตุ: เวลาเป็นเวลาไทย (UTC+7) รายการที่เจ้าหน้าที่ iTIC บันทึกจำนวนมากมีเวลาสิ้นสุด = เริ่ม + 1 ชั่วโมง และ Longdo มีสถานะ จบแล้ว ที่ไฟล์ไม่ได้ระบุ ดังนั้นเวลาสิ้นสุดอาจไม่ใช่เวลาที่เหตุการณ์จบจริง" aria-label="คำอธิบาย: ช่วงเวลา">i</span></span>
+                  <select id="ev-time-mode">
+                    <option value="start" selected>เริ่มในช่วงวันที่ที่เลือก</option>
+                    <option value="active">มีผลอยู่ในช่วงวันที่ที่เลือก</option>
+                    <option value="now">ที่ยังมีผลอยู่ตอนนี้</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>พื้นที่<span role="button" tabindex="0" class="info-tip" data-tip-title="พื้นที่" data-tip="กรอบแผนที่ที่เห็น: ใช้ขอบเขตแผนที่ ณ ตอนที่ค้นหา&#10;รอบจุดที่เลือก: ใช้จุดและรัศมีในแท็บตัวกรอง (ต้องเลือกจุดก่อน)&#10;ทั้งประเทศ: ไม่จำกัดพื้นที่&#10;ข้อมูลเหตุการณ์ไม่มีฟิลด์จังหวัด จึงกรองตามจังหวัดโดยตรงไม่ได้ ให้เลือกจากกรอบแผนที่หรือจุดและรัศมีแทน" aria-label="คำอธิบาย: พื้นที่">i</span></span>
+                  <select id="ev-scope">
+                    <option value="viewport" selected>กรอบแผนที่ที่เห็น</option>
+                    <option value="point">รอบจุดที่เลือก</option>
+                    <option value="all">ทั้งประเทศ</option>
+                  </select>
+                </label>
+              </div>
+
+              <label class="field">
+                <span>แหล่งข่าว<span role="button" tabindex="0" class="info-tip" data-tip-title="แหล่งข่าว" data-tip="ดึงจากข้อความท้ายรายละเอียด (Cr. …) ด้วยโปรแกรม อาจไม่ครบทุกรายการ รายการที่ไม่มี Cr. จะไม่ปรากฏในตัวเลือกนี้" aria-label="คำอธิบาย: แหล่งข่าว">i</span></span>
+                <select id="ev-credit"><option value="">ทั้งหมด</option></select>
+              </label>
+
+              <div class="ev-types-wrap">
+                <span class="ev-types-label">ประเภท<span role="button" tabindex="0" class="info-tip" data-tip-title="ประเภทและจำนวน" data-tip="จำนวนบนปุ่มคือจำนวนเหตุการณ์ที่ตรงเงื่อนไขอื่นทั้งหมด (ช่วงเวลา พื้นที่ คำค้น แหล่งข่าว) แยกตามประเภท&#10;ชื่อประเภทตามตารางรหัสของ Longdo Event (เช่น 1 รถเสีย, 3 อุบัติเหตุ, 6 น้ำท่วม, 15 เพลิงไหม้) รหัสที่ไม่อยู่ในตารางจะแสดงเป็น ประเภท N" aria-label="คำอธิบาย: ประเภทและจำนวน">i</span></span>
+                <div class="ev-types" id="ev-types" role="group" aria-label="ประเภทเหตุการณ์"></div>
+              </div>
+            </div>
+
+            <div class="card events-card" id="events-card">
               <div class="events-head">
                 <div>
-                  <h3>เหตุการณ์ปัจจุบัน</h3>
-                  <p class="muted" id="events-sub"></p>
+                  <h3>ผลการค้นหา<span role="button" tabindex="0" class="info-tip" data-tip-title="เวลาสิ้นสุด" data-tip="แสดง ถึง เฉพาะรายการที่ช่วง start–stop ยาวกว่า 90 นาที เพราะรายการสั้นกว่านั้นมักเป็นเวลาหมดอายุอัตโนมัติ และไฟล์ไม่มีสถานะ จบแล้ว ของ Longdo จึงบอกไม่ได้ว่าเหตุการณ์จบก่อนเวลาสิ้นสุดหรือไม่" aria-label="คำอธิบาย: เวลาสิ้นสุด">i</span></h3>
+                  <p class="muted" id="events-sub">กดค้นหาเพื่อดูเหตุการณ์ตามเงื่อนไขด้านบน</p>
                 </div>
               </div>
               <ul class="events-list" id="events-list"></ul>
-              <p class="events-foot muted">ข้อมูลจาก Longdo Map — เป็นเหตุการณ์สด ไม่ใช่ข้อมูลสถิติอุบัติเหตุ</p>
+              <button type="button" class="btn btn-outline btn-sm btn-block" id="ev-more" hidden>แสดงเพิ่ม</button>
+              <p class="events-foot muted">ข้อมูลจากนกฮูก (คลังย้อนหลัง) และ Longdo Map (เหตุการณ์สด) — ไม่ใช่สถิติอุบัติเหตุ</p>
             </div>
-            <p class="pane-empty">ไม่พบเหตุการณ์สดใกล้พื้นที่ที่ค้นหา หรือยังไม่ได้ค้นหา</p>
           </div>
         </aside>
 
@@ -333,8 +375,8 @@
                   <span>1 แถวต่อ 1 ผู้ประสบเหตุ แยกตามยานพาหนะ</span>
                 </button>
                 <button type="button" class="export-item" id="events-export">
-                  <strong>CSV เหตุการณ์สด</strong>
-                  <span>จาก Longdo Map ตามพื้นที่ที่ค้นหา</span>
+                  <strong>CSV เหตุการณ์จราจร</strong>
+                  <span>ทุกรายการที่ตรงตัวกรองในแท็บเหตุการณ์จราจร</span>
                 </button>
               </div>
             </div>
@@ -348,7 +390,7 @@
             <div class="layer-box" aria-label="ชั้นข้อมูลบนแผนที่">
               <label class="layer-item"><input type="checkbox" id="layer-accidents" checked /><i class="legend-dot dot-injured"></i>อุบัติเหตุ</label>
               <label class="layer-item"><input type="checkbox" id="layer-risks" checked /><i class="legend-dot dot-risk"></i>จุดเสี่ยง</label>
-              <label class="layer-item"><input type="checkbox" id="layer-events" checked /><i class="legend-dot dot-event"></i>เหตุการณ์สด</label>
+              <label class="layer-item"><input type="checkbox" id="layer-events" checked /><i class="legend-dot dot-event"></i>เหตุการณ์จราจร</label>
               <button type="button" class="btn btn-outline btn-sm" id="map-fit">ดูผลลัพธ์ทั้งหมด</button>
             </div>
 
@@ -358,7 +400,7 @@
                 <span class="legend-item"><i class="legend-dot dot-death"></i>เสียชีวิต</span>
                 <span class="legend-item"><i class="legend-dot dot-injured"></i>บาดเจ็บ</span>
                 <span class="legend-item"><i class="legend-dot dot-none"></i>ไม่มี/ไม่ระบุผู้บาดเจ็บ</span>
-                <span class="legend-item"><i class="legend-dot dot-event"></i>เหตุการณ์ปัจจุบัน</span>
+                <span class="legend-item"><i class="legend-dot dot-event"></i>เหตุการณ์จราจร</span>
                 <span class="legend-item"><i class="legend-dot dot-risk"></i>จุดเสี่ยง (แหวน)</span>
                 <span class="legend-item"><i class="legend-dot dot-pin"></i>จุดค้นหา</span>
               </div>
@@ -433,6 +475,6 @@
     </dialog>
 
     <script src="vendor/leaflet/leaflet.js"></script>
-    <script src="app.js?v=8"></script>
+    <script src="app.js?v=10"></script>
   </body>
 </html>

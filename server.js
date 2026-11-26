@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { createTrafficEvents } = require('./traffic-events');
 
 /* ------------------------------------------------------------------ */
 /* Config                                                             */
@@ -49,8 +50,11 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const API_BASE = (process.env.API_BASE || 'https://api.iticfoundation.org/accidents').replace(/\/+$/, '');
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 8 * 60 * 60 * 1000); // 8 h
-/** คีย์ CARTO Basemaps (เก็บใน .env เท่านั้น) — ส่งให้เบราว์เซอร์เฉพาะผู้ใช้ที่ล็อกอินแล้ว */
-const CARTO_KEY = String(process.env.CARTO_KEY || '').trim();
+
+// คีย์แผนที่ CARTO เก็บใน .env เท่านั้น ไม่ส่งไปที่เบราว์เซอร์ — เซิร์ฟเวอร์ดึงกระเบื้องแผนที่แทน (ดู /api/tiles)
+const CARTO_KEY = process.env.CARTO_KEY || '';
+const CARTO_BASE = (process.env.CARTO_BASE || 'https://basemaps.cartocdn.com').replace(/\/+$/, '');
+if (!CARTO_KEY) console.warn('  !  ยังไม่ได้ตั้งค่า CARTO_KEY ใน .env — จะขอกระเบื้องแผนที่โดยไม่ใส่คีย์ (อาจถูกจำกัดโควตา)');
 const UPSTREAM_TIMEOUT_MS = 60_000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const COOKIE_NAME = 'itic_sid';
@@ -272,7 +276,6 @@ async function handleLogin(req, res) {
       roles: data.roles || [],
       permissions: data.permissions || [],
       expiresIn: maxAge,
-      map: { cartoKey: CARTO_KEY },
     },
     {
       'Set-Cookie': `${COOKIE_NAME}=${id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`,
@@ -297,7 +300,6 @@ function handleSession(req, res) {
     roles: session.roles,
     permissions: session.permissions,
     expiresIn: Math.floor((session.expiresAt - Date.now()) / 1000),
-    map: { cartoKey: CARTO_KEY },
   });
 }
 
@@ -802,7 +804,7 @@ async function handleArea(req, res) {
 /* Live traffic events (Longdo feed)                                  */
 /* ------------------------------------------------------------------ */
 
-const LONGDO_FEED = 'https://event.longdo.com/feed/json';
+const LONGDO_FEED = process.env.LONGDO_FEED || 'https://event.longdo.com/feed/json';
 const EVENT_TTL_MS = 60 * 1000;
 
 const EVENT_LABELS = {
@@ -816,6 +818,10 @@ const EVENT_LABELS = {
   event: 'กิจกรรม/พิธี',
   construction: 'ก่อสร้าง',
   protest: 'ชุมนุม',
+  // icon ที่พบใน feed จริง (รหัส 10 / 8 / 7)
+  trafficjam: 'รถติด',
+  information: 'ประกาศ',
+  crowd: 'การชุมนุม',
 };
 
 async function fetchLongdoEvents() {
@@ -852,6 +858,8 @@ async function fetchLongdoEvents() {
       lat,
       lon,
       type: item.icon || 'other',
+      // ถ้า feed ส่งรหัสประเภทตัวเลข (ตารางรหัสของ Longdo) มาด้วย เก็บไว้ใช้จับคู่กับคลังย้อนหลัง
+      typeCode: item.type !== undefined && item.type !== '' && Number.isFinite(Number(item.type)) ? Number(item.type) : null,
       typeLabel: EVENT_LABELS[item.icon] || 'อื่น ๆ',
       start: item.start || '',
       stop: item.stop || '',
@@ -904,6 +912,66 @@ async function handleEvents(req, res) {
 }
 
 /* ------------------------------------------------------------------ */
+/* เหตุการณ์จราจร: คลังย้อนหลัง (นกฮูก) + feed สด รวมเป็นชุดเดียว         */
+/* ------------------------------------------------------------------ */
+
+const trafficEvents = createTrafficEvents({
+  baseDir: __dirname,
+  // ระบุไฟล์เองด้วย EVENTS_FILE ไม่เช่นนั้นใช้ไฟล์ .tsv/.csv/.txt ที่ใหม่สุดในโฟลเดอร์ data/events
+  archiveFile: process.env.EVENTS_FILE || '',
+  archiveDir: path.join(__dirname, 'data', 'events'),
+  fetchLive: fetchLongdoEvents,
+  eventLabels: EVENT_LABELS,
+  // group (ค่าเริ่มต้น) = ไม่ส่งชื่อบัญชีเจ้าหน้าที่รายบุคคลออกไป | full = ส่งชื่อบัญชีเต็ม | none = ไม่ส่งเลย
+  contributorMode: ['group', 'full', 'none'].includes(process.env.EVENTS_CONTRIBUTOR)
+    ? process.env.EVENTS_CONTRIBUTOR
+    : 'group',
+  // บัญชีหน่วยงานที่แสดงชื่อได้ในโหมด group (คั่นด้วยจุลภาค) — ค่าเริ่มต้น RVP ซึ่งเป็นผู้ให้ข้อมูลและปรากฏเป็น Cr.RVP
+  orgAccounts: String(process.env.EVENTS_ORG_ACCOUNTS || 'RVP')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean),
+});
+trafficEvents.init();
+
+async function handleTrafficEvents(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  const url = new URL(req.url, 'http://localhost');
+  sendJSON(res, 200, await trafficEvents.search(url.searchParams));
+}
+
+async function handleTrafficEventsMeta(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  sendJSON(res, 200, await trafficEvents.meta());
+}
+
+async function handleTrafficEventsExport(req, res) {
+  const found = getSession(req);
+  if (!found) return sendJSON(res, 401, { error: 'กรุณาเข้าสู่ระบบก่อน' });
+
+  const url = new URL(req.url, 'http://localhost');
+  const stamp = new Date().toISOString().slice(0, 10);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="traffic_events_${stamp}.csv"`,
+    'Cache-Control': 'no-store',
+  });
+  res.write('\uFEFF'); // BOM ให้ Excel อ่านภาษาไทยถูกต้อง
+
+  const write = (chunk) => new Promise((resolve) => res.write(chunk, resolve));
+  try {
+    await trafficEvents.exportCSV(url.searchParams, write);
+  } finally {
+    res.end();
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Static files                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -946,6 +1014,55 @@ async function serveStatic(req, res) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Map tiles proxy — ซ่อนคีย์ CARTO ไว้ฝั่งเซิร์ฟเวอร์                      */
+/* ------------------------------------------------------------------ */
+
+const TILE_STYLES = { light: 'rastertiles/voyager', dark: 'dark_all' };
+const TILE_PATH_RE = /^\/api\/tiles\/(light|dark)\/(\d{1,2})\/(\d{1,7})\/(\d{1,7})(@2x)?\.png$/;
+
+async function handleTile(req, res, match) {
+  const text = (status, message) => {
+    res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(message);
+  };
+
+  // ต้องเข้าสู่ระบบก่อน ไม่เช่นนั้นเซิร์ฟเวอร์จะกลายเป็นตัวกลางใช้โควตาคีย์ให้คนทั่วไป
+  if (!getSession(req)) return text(401, 'กรุณาเข้าสู่ระบบก่อน');
+
+  const [, style, zs, xs, ys, retina] = match;
+  const z = Number(zs);
+  const x = Number(xs);
+  const y = Number(ys);
+  if (z > 20 || x >= 2 ** z || y >= 2 ** z) return text(400, 'พิกัดกระเบื้องแผนที่ไม่ถูกต้อง');
+
+  const query = CARTO_KEY ? `?key=${encodeURIComponent(CARTO_KEY)}` : '';
+  const upstream = `${CARTO_BASE}/${TILE_STYLES[style]}/${z}/${x}/${y}${retina || ''}.png${query}`;
+
+  let response;
+  try {
+    response = await fetch(upstream, {
+      headers: { 'User-Agent': OSM_UA, Accept: 'image/png,image/*;q=0.8' },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return text(502, 'ดึงกระเบื้องแผนที่ไม่สำเร็จ'); // ไม่แนบรายละเอียดข้อผิดพลาด เพราะอาจมี URL ที่มีคีย์
+  }
+
+  if (!response.ok) {
+    console.warn(`  ✗  tiles: CARTO ตอบ HTTP ${response.status}`); // ไม่บันทึก URL เพื่อไม่ให้คีย์หลุดลง log
+    return text(502, `ดึงกระเบื้องแผนที่ไม่สำเร็จ (${response.status})`);
+  }
+
+  const body = Buffer.from(await response.arrayBuffer());
+  res.writeHead(200, {
+    'Content-Type': response.headers.get('content-type') || 'image/png',
+    'Content-Length': body.length,
+    'Cache-Control': 'private, max-age=86400', // แคชในเบราว์เซอร์ของผู้ใช้เท่านั้น ไม่ใช่แคชกลาง
+  });
+  res.end(body);
+}
+
+/* ------------------------------------------------------------------ */
 /* Router                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -953,6 +1070,8 @@ const server = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
 
   try {
+    const tileMatch = req.method === 'GET' ? TILE_PATH_RE.exec(pathname) : null;
+    if (tileMatch) return await handleTile(req, res, tileMatch);
     if (pathname === '/api/health' && req.method === 'GET') {
       return sendJSON(res, 200, { ok: true, api: API_BASE });
     }
@@ -970,6 +1089,9 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/area' && req.method === 'GET') return await handleArea(req, res);
     if (pathname === '/api/geocode' && req.method === 'GET') return await handleGeocode(req, res);
     if (pathname === '/api/events' && req.method === 'GET') return await handleEvents(req, res);
+    if (pathname === '/api/traffic-events' && req.method === 'GET') return await handleTrafficEvents(req, res);
+    if (pathname === '/api/traffic-events/meta' && req.method === 'GET') return await handleTrafficEventsMeta(req, res);
+    if (pathname === '/api/traffic-events/export' && req.method === 'GET') return await handleTrafficEventsExport(req, res);
 
     if (pathname.startsWith('/api/')) {
       return sendJSON(res, 404, { error: 'ไม่พบ endpoint นี้' });
@@ -995,6 +1117,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`\n  iTIC Accident Data Explorer`);
   console.log(`  ➜  http://${HOST}:${PORT}`);
-  console.log(`  ➜  upstream: ${API_BASE}`);
-  console.log(`  ➜  CARTO basemaps: ${CARTO_KEY ? 'เปิดใช้ (คีย์จาก .env)' : 'ไม่พบ CARTO_KEY — ใช้แผนที่ OSM แทน'}\n`);
+  console.log(`  ➜  upstream: ${API_BASE}\n`);
 });

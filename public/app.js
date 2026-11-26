@@ -60,6 +60,7 @@ const state = {
   session: null,
   place: null,
   events: [],
+  eventsTotal: 0,
   clusters: null,
   orderTypes: [],
   defaultClusterId: null,
@@ -327,12 +328,9 @@ function showApp(session) {
   el.sessionInfo.hidden = false;
   el.sessionUser.textContent = session.username || 'ผู้ใช้';
   document.body.classList.add('is-app');
-
-  // คีย์แผนที่ส่งมากับข้อมูลเซสชัน (อ่านจาก .env ฝั่งเซิร์ฟเวอร์ ไม่ฝังในไฟล์ static)
-  cartoKey = String((session.map && session.map.cartoKey) || '');
-
   // แสดงแผนที่ทันทีที่เข้าสู่ระบบ ไม่ต้องรอผลค้นหา
   if (initMap()) requestAnimationFrame(() => mapState.map.invalidateSize());
+  loadEventsMeta();
   loadClusters().catch((error) => console.warn('clusters:', error.message));
 }
 
@@ -593,9 +591,7 @@ el.resetBtn.addEventListener('click', () => {
   placeItems = [];
   state.place = null;
   el.areaCard.hidden = true;
-  state.events = [];
-  el.eventsCard.hidden = true;
-  el.eventsList.replaceChildren();
+  resetEvents();
   state.risk = null;
   el.riskCard.hidden = true;
   el.riskBody.replaceChildren();
@@ -784,7 +780,7 @@ async function runSearch() {
       state.districtName = '';
     }
 
-    loadEvents(query, rows);
+    scheduleEventsLoad();
 
     if (rows.length > 0) {
       loadRisk(query);
@@ -1117,22 +1113,170 @@ function formatDistance(meters) {
   return meters >= 1000 ? `${(meters / 1000).toFixed(1)} กม.` : `${Math.round(meters)} ม.`;
 }
 
-function renderEvents(events, scope) {
+/* ================================================================== */
+/* เหตุการณ์จราจร (คลังย้อนหลังนกฮูก + feed สด รวมเป็นชุดเดียว)          */
+/* ================================================================== */
+
+const EVENTS_MAP_LIMIT = 2000; // จำนวนสูงสุดที่ดึงมาแสดงบนแผนที่/รายการต่อครั้ง (ส่งออกได้ครบทุกรายการ)
+const EVENTS_LIST_STEP = 100;
+const EVENT_LONG_MINUTES = 90; // แสดง "ถึง ..." เฉพาะรายการที่ยาวกว่านี้ (ที่สั้นกว่ามักเป็นเวลาหมดอายุอัตโนมัติ)
+
+const evEl = {
+  q: $('ev-q'),
+  search: $('ev-search'),
+  timeMode: $('ev-time-mode'),
+  scope: $('ev-scope'),
+  credit: $('ev-credit'),
+  types: $('ev-types'),
+  range: $('ev-range'),
+  sourceText: $('ev-source-text'),
+  more: $('ev-more'),
+};
+
+const evState = {
+  types: new Set(), // ประเภทที่เลือก (kind)
+  facets: { kinds: [], credits: [] },
+  total: 0,
+  shown: EVENTS_LIST_STEP,
+};
+
+let eventsSeq = 0;
+
+function eventKindClass(kind) {
+  return Object.prototype.hasOwnProperty.call(EVENT_COLORS, kind) ? kind : 'other';
+}
+
+/** สร้างพารามิเตอร์ค้นหา/ส่งออกจากฟอร์มหลัก (ช่วงวันที่/จุด/รัศมี) + ตัวกรองในแท็บนี้ */
+function eventParams({ forExport = false } = {}) {
+  const params = new URLSearchParams();
+  const mode = evEl.timeMode.value;
+  params.set('time_mode', mode);
+
+  let rangeText = '';
+  if (mode === 'now') {
+    rangeText = 'ไม่ใช้ช่วงวันที่ — แสดงเฉพาะรายการที่ยังมีผลอยู่ ณ ตอนนี้';
+  } else {
+    const start = el.startDate.value;
+    const end = el.endDate.value;
+    if (start) params.set('start_date', start);
+    if (end) params.set('end_date', end);
+    rangeText = start || end ? `ช่วงวันที่ ${start ? thaiDate(start) : '…'} – ${end ? thaiDate(end) : '…'} (ตั้งในแท็บตัวกรอง)` : 'ไม่ได้จำกัดช่วงวันที่';
+  }
+
+  let scopeText = '';
+  let scope = evEl.scope.value;
+  const lat = Number(el.lat.value);
+  const lon = Number(el.lon.value);
+  const hasPoint = el.useArea.checked && el.lat.value !== '' && el.lon.value !== '' && Number.isFinite(lat) && Number.isFinite(lon);
+
+  if (scope === 'point' && !hasPoint) {
+    scope = 'viewport';
+    scopeText = 'ในกรอบแผนที่ (ยังไม่ได้เลือกจุด)';
+  }
+
+  if (scope === 'point') {
+    const radius = Math.max(Number(el.buffer.value) || 1000, 1);
+    params.set('lat', String(lat));
+    params.set('lon', String(lon));
+    params.set('radius', String(radius));
+    params.set('sort', 'distance');
+    scopeText = `ภายใน ${fmtNum(radius)} ม. รอบจุดที่เลือก`;
+  } else if (scope === 'viewport' && mapState.ready) {
+    const b = mapState.map.getBounds();
+    const usable = b.getNorth() - b.getSouth() > 1e-4 && b.getEast() - b.getWest() > 1e-4;
+    if (usable) {
+      params.set('bbox', [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((n) => n.toFixed(5)).join(','));
+      scopeText = scopeText || 'ในกรอบแผนที่ที่เห็น';
+    } else {
+      // แผนที่ยังไม่มีขนาด (เช่น ถูกซ่อน) → ใช้ทั่วประเทศ แทนการค้นแล้วไม่เจออะไร
+      scopeText = 'ทั่วประเทศ (ยังไม่ทราบกรอบแผนที่)';
+    }
+  } else {
+    scopeText = scopeText || 'ทั่วประเทศ';
+  }
+
+  const q = evEl.q.value.trim();
+  if (q) params.set('q', q);
+  if (evState.types.size > 0) params.set('types', Array.from(evState.types).join(','));
+  if (evEl.credit.value) params.set('credit', evEl.credit.value);
+  if (!forExport) params.set('limit', String(EVENTS_MAP_LIMIT));
+
+  return { params, scopeText, rangeText };
+}
+
+function renderEventChips() {
+  const kinds = new Map(evState.facets.kinds.map((k) => [k.kind, k]));
+  for (const kind of evState.types) if (!kinds.has(kind)) kinds.set(kind, { kind, label: kind, count: 0 }); // เลือกไว้แต่ตอนนี้ไม่มี → ยังยกเลิกได้
+
+  evEl.types.replaceChildren(
+    ...Array.from(kinds.values()).map((k) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `chip ev-chip ev-chip-${eventKindClass(k.kind)}`;
+      chip.setAttribute('aria-pressed', String(evState.types.has(k.kind)));
+      chip.dataset.kind = k.kind;
+      chip.textContent = `${k.label} ${fmtNum(k.count)}`;
+      return chip;
+    })
+  );
+}
+
+function renderEventCredits() {
+  const selected = evEl.credit.value;
+  const credits = evState.facets.credits.slice();
+  if (selected && !credits.some((c) => c.credit === selected)) credits.unshift({ credit: selected, count: 0 });
+
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = 'ทั้งหมด';
+  evEl.credit.replaceChildren(
+    all,
+    ...credits.map((c) => {
+      const option = document.createElement('option');
+      option.value = c.credit;
+      option.textContent = `${c.credit} (${fmtNum(c.count)})`;
+      return option;
+    })
+  );
+  evEl.credit.value = selected;
+}
+
+function renderEventSource(source) {
+  if (!source) return;
+  let text;
+  if (source.archiveLoading && !source.archiveLoaded) {
+    text = 'กำลังโหลดคลังย้อนหลัง…';
+  } else if (!source.archiveLoaded) {
+    text = 'ยังไม่ได้โหลดคลังย้อนหลัง (วางไฟล์ไว้ในโฟลเดอร์ data/events) — แสดงเฉพาะเหตุการณ์สด';
+  } else {
+    const range = source.archiveFrom && source.archiveTo ? ` (${source.archiveFrom.slice(0, 10)} ถึง ${source.archiveTo.slice(0, 10)})` : '';
+    text = `คลังย้อนหลัง ${fmtNum(source.archiveRows)} รายการ${range}`;
+  }
+  text += source.liveError ? ' · ดึงเหตุการณ์สดไม่สำเร็จ' : ` · เหตุการณ์สด ${fmtNum(source.liveCount)}`;
+  evEl.sourceText.textContent = `${text} `;
+}
+
+function renderEventList() {
   el.eventsList.replaceChildren();
 
-  if (events.length === 0) {
-    el.eventsCard.hidden = true;
+  if (state.events.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'event-empty muted';
+    empty.textContent = 'ไม่พบเหตุการณ์ตามเงื่อนไขที่กำหนด';
+    el.eventsList.appendChild(empty);
+    evEl.more.hidden = true;
     return;
   }
 
-  el.eventsCard.hidden = false;
-  el.eventsSub.textContent = `พบ ${fmtNum(events.length)} เหตุการณ์${scope}`;
-
-  for (const event of events) {
+  const visible = state.events.slice(0, evState.shown);
+  for (const event of visible) {
     const item = document.createElement('li');
+    item.className = 'event-item';
+    item.tabIndex = 0;
+    item.dataset.eventId = event.id;
 
     const badge = document.createElement('span');
-    badge.className = `badge ev-${event.type || 'other'}`;
+    badge.className = `badge ev-${eventKindClass(event.type)}`;
     badge.textContent = event.typeLabel || 'อื่น ๆ';
 
     const main = document.createElement('div');
@@ -1145,112 +1289,204 @@ function renderEvents(events, scope) {
     const meta = document.createElement('span');
     meta.className = 'event-meta';
     const parts = [formatEventTime(event.start)];
-    if (event.stop) parts.push(`ถึง ${formatEventTime(event.stop)}`);
+    if (event.stop && event.durationMin > EVENT_LONG_MINUTES) parts.push(`ถึง ${formatEventTime(event.stop)}`);
     if (Number.isFinite(event.distance)) parts.push(formatDistance(event.distance));
-    if (event.contributor) parts.push(`โดย ${event.contributor}`);
+    if (event.credit) parts.push(`ข่าวจาก ${event.credit}`);
+    if (event.origin === 'live') parts.push('สด');
     meta.textContent = parts.filter(Boolean).join(' · ');
 
     main.append(title, meta);
     item.append(badge, main);
     el.eventsList.appendChild(item);
   }
+
+  const rest = state.events.length - visible.length;
+  evEl.more.hidden = rest <= 0;
+  if (rest > 0) evEl.more.textContent = `แสดงเพิ่ม (เหลือ ${fmtNum(rest)} รายการ)`;
 }
 
-async function loadEvents(query, rows) {
-  el.eventsCard.hidden = true;
-  el.eventsList.replaceChildren();
-  state.events = [];
+function renderEventsPanel(scopeText, rangeText, payload) {
+  evEl.range.textContent = rangeText;
 
-  const params = new URLSearchParams();
-  let scope = '';
+  const shown = state.events.length;
+  let sub = `พบ ${fmtNum(payload.total)} เหตุการณ์ ${scopeText}`;
+  if (payload.truncated) sub += ` · ดึงมาแสดง ${fmtNum(shown)} รายการล่าสุด (ส่งออกได้ครบทุกรายการ หรือจำกัดเงื่อนไขให้แคบลง)`;
+  el.eventsSub.textContent = sub;
 
-  if (query.point) {
-    const radius = Math.max(Number(query.buffer) || 1000, 5000);
-    params.set('lat', query.point.lat);
-    params.set('lon', query.point.lon);
-    params.set('radius', String(radius));
-    scope = ` ภายใน ${fmtNum(Math.round(radius / 1000))} กม.`;
-  } else {
-    const bbox = bboxOf(rows);
-    if (bbox) {
-      params.set('bbox', bbox.join(','));
-      scope = ' ในพื้นที่ผลค้นหา';
-    } else {
-      scope = ' ทั่วประเทศ';
-    }
-  }
+  evState.facets = payload.facets || { kinds: [], credits: [] };
+  evState.total = payload.total || 0;
+  renderEventChips();
+  renderEventCredits();
+  renderEventSource(payload.source);
+  renderEventList();
+}
+
+async function loadEvents() {
+  const seq = ++eventsSeq;
+  evState.shown = EVENTS_LIST_STEP;
+  evEl.search.disabled = true;
+  el.eventsSub.textContent = 'กำลังค้นหาเหตุการณ์…';
+
+  const { params, scopeText, rangeText } = eventParams();
 
   try {
-    const payload = await api(`/api/events?${params.toString()}`);
+    const payload = await api(`/api/traffic-events?${params.toString()}`);
+    if (seq !== eventsSeq) return;
     state.events = payload.data || [];
-    renderEvents(state.events, scope);
-    renderEventMarkers();
+    state.eventsTotal = payload.total || 0;
+    renderEventsPanel(scopeText, rangeText, payload);
   } catch (error) {
+    if (seq !== eventsSeq) return;
     state.events = [];
-    el.eventsCard.hidden = true;
-    renderEventMarkers();
-    console.warn('events:', error.message);
+    state.eventsTotal = 0;
+    evEl.range.textContent = rangeText;
+    el.eventsSub.textContent = `ค้นหาเหตุการณ์ไม่สำเร็จ: ${error.message}`;
+    renderEventList();
+  } finally {
+    if (seq === eventsSeq) evEl.search.disabled = false;
+  }
+
+  if (seq === eventsSeq) renderEventMarkers();
+}
+
+/** ค้นหาพร้อมการค้นหาหลัก: ถ้าใช้กรอบแผนที่ ให้รอแผนที่เลื่อนไปที่ผลค้นหาเสร็จก่อน แล้วใช้กรอบที่เห็นจริง */
+function scheduleEventsLoad() {
+  if (!mapState.ready || evEl.scope.value !== 'viewport') {
+    loadEvents();
+    return;
+  }
+  let done = false;
+  const go = () => {
+    if (done) return;
+    done = true;
+    mapState.map.off('moveend', go);
+    loadEvents();
+  };
+  mapState.map.once('moveend', go);
+  setTimeout(go, 900);
+}
+
+async function loadEventsMeta() {
+  try {
+    const meta = await api('/api/traffic-events/meta');
+    renderEventSource({
+      archiveLoaded: meta.archive.loaded,
+      archiveLoading: meta.archive.loading,
+      archiveRows: meta.archive.rows,
+      archiveFrom: meta.archive.from,
+      archiveTo: meta.archive.to,
+      liveCount: meta.live.count,
+      liveError: meta.live.error,
+    });
+  } catch (error) {
+    console.warn('events meta:', error.message);
   }
 }
 
+function resetEvents() {
+  eventsSeq += 1; // ยกเลิกคำขอที่ค้างอยู่
+  state.events = [];
+  state.eventsTotal = 0;
+  evState.types.clear();
+  evState.facets = { kinds: [], credits: [] };
+  evState.total = 0;
+  evState.shown = EVENTS_LIST_STEP;
+  evEl.q.value = '';
+  evEl.credit.replaceChildren(new Option('ทั้งหมด', ''));
+  evEl.types.replaceChildren();
+  evEl.range.textContent = '';
+  el.eventsSub.textContent = 'กดค้นหาเพื่อดูเหตุการณ์ตามเงื่อนไขด้านบน';
+  el.eventsList.replaceChildren();
+  evEl.more.hidden = true;
+}
+
+evEl.search.addEventListener('click', loadEvents);
+evEl.q.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    loadEvents();
+  }
+});
+evEl.timeMode.addEventListener('change', loadEvents);
+evEl.scope.addEventListener('change', loadEvents);
+evEl.credit.addEventListener('change', loadEvents);
+
+evEl.types.addEventListener('click', (event) => {
+  const chip = event.target.closest('.ev-chip');
+  if (!chip) return;
+  const kind = chip.dataset.kind;
+  if (evState.types.has(kind)) evState.types.delete(kind);
+  else evState.types.add(kind);
+  loadEvents();
+});
+
+evEl.more.addEventListener('click', () => {
+  evState.shown += EVENTS_LIST_STEP;
+  renderEventList();
+});
+
+/* คลิกรายการ → แผนที่เลื่อนไปที่จุดและเปิดรายละเอียด */
+function focusEvent(id) {
+  const event = state.events.find((item) => item.id === id);
+  if (!event || !mapState.ready) return;
+
+  if (mapState.mode === 'area') setMapMode('inspect'); // ไม่ให้การเปิด popup ถูกตีความเป็นการเลือกบริเวณ
+  if (!mapState.map.hasLayer(mapState.events)) {
+    ui.layerEvents.checked = true;
+    setLayerVisible(mapState.events, true);
+  }
+
+  mapState.map.setView([event.lat, event.lon], Math.max(mapState.map.getZoom(), 15), { animate: true });
+  const marker = mapState.eventMarkers.get(id);
+  if (marker) marker.openPopup();
+
+  if (window.matchMedia('(max-width: 860px)').matches) {
+    el.mapCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+el.eventsList.addEventListener('click', (event) => {
+  const item = event.target.closest('.event-item');
+  if (item) focusEvent(item.dataset.eventId);
+});
+el.eventsList.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const item = event.target.closest('.event-item');
+  if (!item) return;
+  event.preventDefault();
+  focusEvent(item.dataset.eventId);
+});
+
+/* ส่งออก CSV: ให้เซิร์ฟเวอร์ส่งทุกรายการที่ตรงตัวกรอง (ไม่จำกัดที่ 2,000 รายการบนแผนที่) */
 el.eventsExport.addEventListener('click', () => {
   if (state.events.length === 0) {
-    setStatus('ไม่มีเหตุการณ์ปัจจุบันให้ส่งออก', 'error');
+    setStatus('ยังไม่มีเหตุการณ์จราจรให้ส่งออก — ค้นหาในแท็บเหตุการณ์จราจรก่อน', 'error');
     return;
   }
 
-  const header = [
-    'รหัสเหตุการณ์', 'ประเภท', 'หัวข้อ', 'รายละเอียด', 'เริ่ม', 'สิ้นสุด',
-    'ละติจูด', 'ลองจิจูด', 'ระยะทาง (กม.)', 'ผู้ให้ข้อมูล',
-  ];
-
-  const rows = state.events.map((event) => [
-    event.id,
-    event.typeLabel,
-    event.title,
-    event.description,
-    event.start,
-    event.stop,
-    event.lat,
-    event.lon,
-    Number.isFinite(event.distance) ? (event.distance / 1000).toFixed(2) : '',
-    event.contributor,
-  ]);
-
-  const stamp = new Date().toISOString().slice(0, 10);
-  downloadCSV(`longdo_events_${stamp}.csv`, header, rows);
-  setStatus(`ส่งออกเหตุการณ์ปัจจุบัน ${fmtNum(rows.length)} รายการแล้ว`);
+  const { params } = eventParams({ forExport: true });
+  const link = document.createElement('a');
+  link.href = `/api/traffic-events/export?${params.toString()}`;
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setStatus(`กำลังส่งออกเหตุการณ์จราจร ${fmtNum(evState.total)} รายการตามตัวกรอง`);
 });
 
 /* ================================================================== */
 /* Map (Leaflet + CARTO basemaps)                                     */
 /* ================================================================== */
 
-/* คีย์ CARTO มาจากเซิร์ฟเวอร์ (อ่านจาก .env) เฉพาะผู้ใช้ที่ล็อกอินแล้ว — ไม่ฝังในโค้ดฝั่งเบราว์เซอร์ */
-let cartoKey = '';
-
-const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-const OSM_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
-const CARTO_ATTRIBUTION =
+const TILE_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' +
   ' · &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
 
-const CARTO_TILES = {
-  light: 'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-  dark: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+// กระเบื้องแผนที่ดึงผ่านเซิร์ฟเวอร์ (คีย์ CARTO อยู่ใน .env ฝั่งเซิร์ฟเวอร์ ไม่อยู่ในโค้ดหน้าเว็บ)
+const TILE_URLS = {
+  light: '/api/tiles/light/{z}/{x}/{y}{r}.png',
+  dark: '/api/tiles/dark/{z}/{x}/{y}{r}.png',
 };
-
-/** ชุดแผนที่ตามธีม: ใช้ CARTO เมื่อมีคีย์ ไม่งั้นถอยไปใช้ OSM มาตรฐาน */
-function tileSourceFor(theme) {
-  if (cartoKey) {
-    return {
-      url: `${CARTO_TILES[theme] || CARTO_TILES.light}?key=${encodeURIComponent(cartoKey)}`,
-      attribution: CARTO_ATTRIBUTION,
-    };
-  }
-  return { url: OSM_TILE_URL, attribution: OSM_ATTRIBUTION };
-}
 
 const MAP_MAX_ACCIDENTS = 4000;
 const MAP_MAX_RISKS = 400;
@@ -1269,6 +1505,14 @@ const EVENT_COLORS = {
   event: '#4f46e5',
   construction: '#a16207',
   protest: '#db2777',
+  rain: '#0891b2',
+  info: '#2563eb',
+  checkpoint: '#0f766e',
+  trafficjam: '#9a3412',
+  warning: '#ca8a04',
+  sale: '#16a34a',
+  complaint: '#c026d3',
+  misc: '#64748b',
   other: '#64748b',
 };
 
@@ -1285,6 +1529,7 @@ const mapState = {
   pin: null,
   pinMarker: null,
   circle: null,
+  eventMarkers: new Map(),
   mode: 'inspect', // 'inspect' = คลิกจุดเพื่อดูข้อมูล, 'area' = คลิกแผนที่เพื่อเลือกบริเวณ
   showRisks: true,
   located: 0,
@@ -1339,12 +1584,11 @@ function initMap() {
 function setTileTheme(theme) {
   if (!mapState.map) return;
 
-  const source = tileSourceFor(theme);
-  const layer = L.tileLayer(source.url, {
-    attribution: source.attribution,
+  const layer = L.tileLayer(TILE_URLS[theme] || TILE_URLS.light, {
+    attribution: TILE_ATTRIBUTION,
     maxZoom: 20,
-    maxNativeZoom: cartoKey ? 20 : 19,
-    detectRetina: Boolean(cartoKey),
+    maxNativeZoom: 20,
+    detectRetina: true,
   });
 
   layer.addTo(mapState.map);
@@ -1420,10 +1664,30 @@ function eventPopup(event) {
   title.textContent = event.title || '(ไม่มีชื่อเหตุการณ์)';
 
   const parts = [event.typeLabel, formatEventTime(event.start)];
+  if (event.stop && event.durationMin > EVENT_LONG_MINUTES) parts.push(`ถึง ${formatEventTime(event.stop)}`);
   if (Number.isFinite(event.distance)) parts.push(formatDistance(event.distance));
 
-  const desc = popupLine(String(event.description || '').replace(/\s+/g, ' ').slice(0, 180));
-  return popupBox([title, popupLine(parts.filter(Boolean).join(' · ')), desc]);
+  const desc = popupLine(String(event.description || '').replace(/\s+/g, ' ').slice(0, 400));
+
+  const foot = [];
+  if (event.credit) foot.push(`ข่าวจาก ${event.credit}`);
+  if (event.contributor) foot.push(`ผู้ป้อน ${event.contributor}`);
+  foot.push(event.origin === 'live' ? 'เหตุการณ์สด' : 'คลังย้อนหลัง');
+
+  const actions = document.createElement('div');
+  actions.className = 'popup-actions';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-outline btn-sm';
+  btn.textContent = 'ค้นหาอุบัติเหตุรอบจุดนี้';
+  btn.addEventListener('click', () => {
+    mapState.map.closePopup();
+    movePin(event.lat, event.lon, { search: true });
+    mapState.map.setView([event.lat, event.lon], 16);
+  });
+  actions.appendChild(btn);
+
+  return popupBox([title, popupLine(parts.filter(Boolean).join(' · ')), desc, popupLine(foot.join(' · ')), actions]);
 }
 
 function riskPopup(spot, level) {
@@ -1563,19 +1827,21 @@ function renderEventMarkers() {
   if (!mapState.ready) return;
 
   mapState.events.clearLayers();
+  mapState.eventMarkers.clear();
   for (const event of state.events) {
     if (!Number.isFinite(event.lat) || !Number.isFinite(event.lon)) continue;
-    L.circleMarker([event.lat, event.lon], {
+    const marker = L.circleMarker([event.lat, event.lon], {
       bubblingMouseEvents: false,
-      radius: 8,
+      radius: 7,
       weight: 2,
       color: '#ffffff',
       opacity: 0.95,
-      fillColor: EVENT_COLORS[event.type] || EVENT_COLORS.other,
+      fillColor: EVENT_COLORS[eventKindClass(event.type)],
       fillOpacity: 0.95,
     })
-      .bindPopup(() => eventPopup(event), { minWidth: 220 })
+      .bindPopup(() => eventPopup(event), { minWidth: 240, maxWidth: 320 })
       .addTo(mapState.events);
+    mapState.eventMarkers.set(event.id, marker);
   }
   raiseAccidents();
   updateMapSummary();
@@ -1619,14 +1885,20 @@ function renderRiskMarkers() {
 
 function updateMapSummary() {
   const total = state.view.length;
-  const parts = [`แสดง ${fmtNum(mapState.shown)} จาก ${fmtNum(total)} รายการ`];
-  if (total > MAP_MAX_ACCIDENTS) parts.push(`จำกัด ${fmtNum(MAP_MAX_ACCIDENTS)} จุดเพื่อความเร็ว`);
-  if (state.events.length) parts.push(`เหตุการณ์ปัจจุบัน ${fmtNum(state.events.length)}`);
+  const parts = [];
+  if (total > 0 || mapState.shown > 0) {
+    parts.push(`อุบัติเหตุ แสดง ${fmtNum(mapState.shown)} จาก ${fmtNum(total)} รายการ`);
+    if (total > MAP_MAX_ACCIDENTS) parts.push(`จำกัด ${fmtNum(MAP_MAX_ACCIDENTS)} จุดเพื่อความเร็ว`);
+  }
+  if (state.events.length) {
+    const evTotal = state.eventsTotal > state.events.length ? `${fmtNum(state.events.length)}/${fmtNum(state.eventsTotal)}` : fmtNum(state.events.length);
+    parts.push(`เหตุการณ์จราจร ${evTotal}`);
+  }
   if (state.risk && state.risk.rows.length && mapState.showRisks) {
     const drawn = Math.min(state.risk.rows.length, MAP_MAX_RISKS);
     parts.push(`จุดเสี่ยง ${fmtNum(drawn)}${state.risk.rows.length > drawn ? `/${fmtNum(state.risk.rows.length)}` : ''}`);
   }
-  el.mapSub.textContent = parts.join(' · ');
+  el.mapSub.textContent = parts.length > 0 ? parts.join(' · ') : '—';
 }
 
 let mapRenderTimer = null;
@@ -2949,7 +3221,7 @@ function refreshChrome() {
   const counts = {
     results: state.view.length,
     risk: state.risk && state.risk.rows ? state.risk.rows.length : 0,
-    events: state.events.length,
+    events: state.eventsTotal || state.events.length,
   };
 
   for (const badge of document.querySelectorAll('.tab-count')) {
