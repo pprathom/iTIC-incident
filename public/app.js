@@ -1764,7 +1764,7 @@ function renderMap() {
   for (const { accident, ll } of shown) {
     L.circleMarker(ll, {
       bubblingMouseEvents: false,
-      radius: 5,
+      radius: 4,
       weight: 1,
       color: '#ffffff',
       opacity: 0.85,
@@ -1823,6 +1823,30 @@ function raiseAccidents() {
   });
 }
 
+/**
+ * หมุดเหตุการณ์จราจรแบบสามเหลี่ยม — สืบทอดจาก CircleMarker เพื่อคง popup/คลิก/ลำดับชั้นเดิม
+ * แต่วาดเป็นสามเหลี่ยมบน canvas (ตาม preferCanvas) ให้แยกจากวงกลมของอุบัติเหตุได้ง่าย
+ * ใช้สีจาก EVENT_COLORS ชุดเดิม และไม่มีขอบขาวเพื่อให้ดูไม่ใหญ่เกินไป
+ */
+const EventTriangleMarker = L.CircleMarker.extend({
+  _updatePath() {
+    const ctx = this._renderer && this._renderer._ctx;
+    if (!ctx) return;
+
+    const { x, y } = this._point;
+    const r = Math.max(Math.round(this._radius), 1);
+
+    // สามเหลี่ยมชี้ขึ้น: ยอดเหนือจุดอ้างอิง ฐานอยู่ใต้จุดอ้างอิงเล็กน้อย
+    ctx.beginPath();
+    ctx.moveTo(x, y - r * 1.25);
+    ctx.lineTo(x + r, y + r * 0.85);
+    ctx.lineTo(x - r, y + r * 0.85);
+    ctx.closePath();
+
+    this._renderer._fillStroke(ctx, this);
+  },
+});
+
 function renderEventMarkers() {
   if (!mapState.ready) return;
 
@@ -1830,14 +1854,13 @@ function renderEventMarkers() {
   mapState.eventMarkers.clear();
   for (const event of state.events) {
     if (!Number.isFinite(event.lat) || !Number.isFinite(event.lon)) continue;
-    const marker = L.circleMarker([event.lat, event.lon], {
+    // สามเหลี่ยมเล็ก (สูง ~10.5px) — ไม่มีขอบ เพื่อไม่ให้ดูใหญ่กว่าจุดอุบัติเหตุ
+    const marker = new EventTriangleMarker([event.lat, event.lon], {
       bubblingMouseEvents: false,
-      radius: 7,
-      weight: 2,
-      color: '#ffffff',
-      opacity: 0.95,
+      radius: 5,
+      stroke: false,
       fillColor: EVENT_COLORS[eventKindClass(event.type)],
-      fillOpacity: 0.95,
+      fillOpacity: 0.9,
     })
       .bindPopup(() => eventPopup(event), { minWidth: 240, maxWidth: 320 })
       .addTo(mapState.events);
